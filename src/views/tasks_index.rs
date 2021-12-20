@@ -335,7 +335,7 @@ impl Task {
     fn render_as_table_row(&self) -> Html {
         let state = match self.state() {
             TaskState::Running => "▶️",
-            TaskState::Idle => "?",
+            TaskState::Idle => "⏸",
             TaskState::Completed => "⏹",
         };
 
@@ -404,15 +404,35 @@ impl Task {
     }
 
     fn state(&self) -> TaskState {
-        if let Some(stats) = &self.stats {
-            if stats.dropped_at.is_some() {
-                TaskState::Completed
-            } else {
-                TaskState::Running
-            }
-        } else {
-            TaskState::Running
+        if self.is_completed() {
+            return TaskState::Completed;
         }
+
+        if self.is_running() {
+            return TaskState::Running;
+        }
+
+        TaskState::Idle
+    }
+
+    fn is_completed(&self) -> bool {
+        let stats = if let Some(stats) = &self.stats {
+            stats
+        } else {
+            return false;
+        };
+
+        stats.dropped_at.is_some()
+    }
+
+    fn is_running(&self) -> bool {
+        let stats = if let Some(stats) = &self.stats {
+            stats
+        } else {
+            return false;
+        };
+
+        stats.last_poll_started > stats.last_poll_ended
     }
 }
 
@@ -509,6 +529,8 @@ struct Stats {
     dropped_at: Option<SystemTime>,
     created_at: Option<SystemTime>,
     busy_time: Option<Duration>,
+    last_poll_started: Option<Duration>,
+    last_poll_ended: Option<Duration>,
     polls: u64,
 }
 
@@ -537,11 +559,21 @@ impl TryFrom<console_api::tasks::Stats> for Stats {
             .busy_time
             .map(|d| Duration::new(d.seconds as _, d.nanos as _));
 
+        let last_poll_started = poll_stats
+            .last_poll_started
+            .map(|d| Duration::new(d.seconds as _, d.nanos as _));
+
+        let last_poll_ended = poll_stats
+            .last_poll_ended
+            .map(|d| Duration::new(d.seconds as _, d.nanos as _));
+
         Ok(Self {
             dropped_at,
             created_at,
             polls,
             busy_time,
+            last_poll_started,
+            last_poll_ended,
         })
     }
 }
