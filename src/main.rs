@@ -1,97 +1,74 @@
-use axum::{
-    async_trait,
-    extract::{Extension, FromRequest, RequestParts},
-    response::IntoResponse,
-    routing::get,
-    AddExtensionLayer, Router,
-};
-use axum_liveview::{html, pubsub::InProcess, Html};
+use axum::{AddExtensionLayer, Router};
+use axum_liveview::{pubsub::InProcess, PubSub};
 use clap::Parser;
-use std::{convert::Infallible, net::SocketAddr};
+use std::{net::SocketAddr, time::Duration};
 use tower::ServiceBuilder;
+use tower_http::ServiceBuilderExt;
+use tracing_subscriber::{prelude::*, EnvFilter};
+
+mod cancel_on_drop;
+mod routes;
+mod views;
 
 #[derive(Debug, Parser)]
-struct Opt {
+struct Config {
     #[clap(long, env = "TOKIO_CONSOLE_BIND_ADDR", default_value = "0.0.0.0:3000")]
     bind_addr: SocketAddr,
+
+    #[clap(
+        long,
+        env = "TOKIO_CONSOLE_ADDR",
+        default_value = "http://127.0.0.1:6669"
+    )]
+    console_addr: String,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
-    tracing::trace!(?opt);
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(
+            EnvFilter::default()
+                .add_directive("tower_http=trace".parse()?)
+                .add_directive("tokio_console_web=trace".parse()?),
+        )
+        .init();
+
+    let config = Config::parse();
+    tracing::trace!(?config);
 
     let pubsub = InProcess::new();
 
+    tokio::spawn(send_ticks(pubsub.clone()));
+
     let app = Router::new()
-        .merge(root())
+        .merge(routes::all())
         .merge(axum_liveview::routes())
         .layer(
             ServiceBuilder::new()
-                .layer(AddExtensionLayer::new(Port(opt.bind_addr.port())))
-                .layer(axum_liveview::layer(pubsub)),
+                .layer(AddExtensionLayer::new(Port(config.bind_addr.port())))
+                .layer(AddExtensionLayer::new(pubsub.clone()))
+                .layer(axum_liveview::layer(pubsub))
+                .trace_for_http(),
         );
 
-    axum::Server::bind(&opt.bind_addr)
+    axum::Server::bind(&config.bind_addr)
         .serve(app.into_make_service())
         .await?;
 
     Ok(())
 }
 
-fn root() -> Router {
-    async fn handler(layout: Layout) -> impl IntoResponse {
-        layout.render(html! { "Hi from 'GET /'" })
-    }
-
-    Router::new().route("/", get(handler))
-}
-
 #[derive(Copy, Clone)]
 struct Port(u16);
 
-struct Layout {
-    port: u16,
-}
+type InstrumentClient =
+    console_api::instrument::instrument_client::InstrumentClient<tonic::transport::Channel>;
 
-impl Layout {
-    fn render(self, content: Html) -> Html {
-        html! {
-            <!DOCTYPE html>
-            <html>
-                <head>
-                    { axum_liveview::assets() }
-                </head>
-                <body>
-                    { content }
-
-                    <script>
-                        {
-                            format!(
-                                r#"
-                                    const liveView = new LiveView('localhost', {})
-                                    liveView.connect()
-                                "#,
-                                self.port,
-                            )
-                        }
-                    </script>
-                </body>
-            </html>
-        }
-    }
-}
-
-#[async_trait]
-impl<B> FromRequest<B> for Layout
-where
-    B: Send,
-{
-    type Rejection = Infallible;
-
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let Extension(Port(port)) = FromRequest::from_request(req).await.unwrap();
-
-        Ok(Self { port })
+async fn send_ticks(pubsub: InProcess) {
+    let mut interval = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        interval.tick().await;
+        let _ = pubsub.broadcast("tick", ()).await;
     }
 }

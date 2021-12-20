@@ -125,7 +125,7 @@ dependencies = [
 [[package]]
 name = "axum-liveview"
 version = "0.1.0"
-source = "git+https://github.com/davidpdrsn/axum-liveview#1f4723c3f6603316636f1b41711dbc2778961ba8"
+source = "git+https://github.com/davidpdrsn/axum-liveview#4152dd58be0b77ca677b94ab66228ee0269ea08c"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -152,7 +152,7 @@ dependencies = [
 [[package]]
 name = "axum-liveview-macros"
 version = "0.1.0"
-source = "git+https://github.com/davidpdrsn/axum-liveview#1f4723c3f6603316636f1b41711dbc2778961ba8"
+source = "git+https://github.com/davidpdrsn/axum-liveview#4152dd58be0b77ca677b94ab66228ee0269ea08c"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -206,6 +206,20 @@ name = "cfg-if"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
+
+[[package]]
+name = "chrono"
+version = "0.4.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "670ad68c9088c2a963aaa298cb369688cf3f9465ce5e2d4ca10e6e0098a1ce73"
+dependencies = [
+ "libc",
+ "num-integer",
+ "num-traits",
+ "serde",
+ "time",
+ "winapi",
+]
 
 [[package]]
 name = "clap"
@@ -371,6 +385,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "h2"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f072413d126e57991455e0a922b31e4c8ba7c2ffbebf6b78b4f8521397d65cd"
+dependencies = [
+ "bytes",
+ "fnv",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "http",
+ "indexmap",
+ "slab",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -444,6 +477,7 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "httparse",
@@ -455,6 +489,18 @@ dependencies = [
  "tower-service",
  "tracing",
  "want",
+]
+
+[[package]]
+name = "hyper-timeout"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbb958482e8c7be4bc3cf272a766a2b0bf1a6755e7a6ae777f017a31d11b13b1"
+dependencies = [
+ "hyper",
+ "pin-project-lite",
+ "tokio",
+ "tokio-io-timeout",
 ]
 
 [[package]]
@@ -606,6 +652,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3f6bb902e437b6d86e03cce10a7e2af662292c5dfef23b65899ea3ac9354ad44"
 dependencies = [
  "winapi",
+]
+
+[[package]]
+name = "num-integer"
+version = "0.1.44"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2cc698a63b549a70bc047073d2949cce27cd1c7b0a4a862d08a8031bc2801db"
+dependencies = [
+ "autocfg",
+ "num-traits",
+]
+
+[[package]]
+name = "num-traits"
+version = "0.2.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a64b1ec5cda2586e284722486d802acf1f7dbdc623e2bfc57e65ca1cd099290"
+dependencies = [
+ "autocfg",
 ]
 
 [[package]]
@@ -1087,6 +1152,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "time"
+version = "0.1.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca8a50ef2360fbd1eeb0ecd46795a87a19024eb4b53c5dc916ca1fd95fe62438"
+dependencies = [
+ "libc",
+ "winapi",
+]
+
+[[package]]
 name = "tinyvec"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1127,12 +1202,30 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-liveview",
+ "chrono",
  "clap",
  "console-api",
+ "once_cell",
+ "regex",
+ "serde",
  "tokio",
+ "tokio-util",
+ "tonic",
  "tower",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "tokio-io-timeout"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "90c49f106be240de154571dd31fbe48acb10ba6c6dd6f6517ad603abffa42de9"
+dependencies = [
+ "pin-project-lite",
+ "tokio",
 ]
 
 [[package]]
@@ -1196,17 +1289,23 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
+ "hyper",
+ "hyper-timeout",
  "percent-encoding",
  "pin-project",
  "prost",
  "prost-derive",
+ "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower",
  "tower-layer",
  "tower-service",
  "tracing",
+ "tracing-futures",
 ]
 
 [[package]]
@@ -1229,9 +1328,13 @@ checksum = "5651b5f6860a99bd1adb59dbfe1db8beb433e73709d9032b413a77e2fb7c066a"
 dependencies = [
  "futures-core",
  "futures-util",
+ "indexmap",
  "pin-project",
  "pin-project-lite",
+ "rand",
+ "slab",
  "tokio",
+ "tokio-stream",
  "tokio-util",
  "tower-layer",
  "tower-service",
@@ -1252,8 +1355,10 @@ dependencies = [
  "http-body",
  "http-range-header",
  "pin-project-lite",
+ "tower",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]
@@ -1299,6 +1404,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f4ed65637b8390770814083d20756f87bfa2c21bf2f110babdc5438351746e4"
 dependencies = [
  "lazy_static",
+]
+
+[[package]]
+name = "tracing-futures"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97d095ae15e245a057c8e8451bab9b3ee1e1f68e9ba2b4fbc18d0ac5237835f2"
+dependencies = [
+ "pin-project",
+ "tracing",
 ]
 
 [[package]]
