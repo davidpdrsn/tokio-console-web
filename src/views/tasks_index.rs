@@ -1,11 +1,11 @@
 use crate::{cancel_on_drop::CancelOnDrop, routes::ConsoleAddr};
 use anyhow::Context as _;
 use axum_liveview::{html, pubsub::Bincode, Html, LiveView, ShouldRender};
-use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
+    time::{Duration, SystemTime},
 };
 use uuid::Uuid;
 
@@ -46,13 +46,13 @@ impl LiveView for TasksIndex {
         let mut total = 0;
         let mut running = 0;
         let mut idle = 0;
-        let mut dropped = 0;
+        let mut completed = 0;
         for task in self.tasks.values() {
             total += 1;
             match task.state() {
                 TaskState::Running => running += 1,
                 TaskState::Idle => idle += 1,
-                TaskState::Dropped => dropped += 1,
+                TaskState::Completed => completed += 1,
             }
         }
 
@@ -74,8 +74,8 @@ impl LiveView for TasksIndex {
                             ", idle: " { idle }
                         }
 
-                        if dropped != 0 {
-                            ", dropped: " { dropped }
+                        if completed != 0 {
+                            ", completed: " { completed }
                         }
                     </div>
                     <hr />
@@ -163,7 +163,7 @@ impl TasksIndex {
         self.tasks.retain(|_id, task| {
             if let Some(stats) = &task.stats {
                 if let Some(dropped_at) = stats.dropped_at {
-                    dropped_at > (Utc::now() - chrono::Duration::seconds(5))
+                    dropped_at.elapsed().unwrap() < Duration::from_secs(5)
                 } else {
                     true
                 }
@@ -336,7 +336,7 @@ impl Task {
         let state = match self.state() {
             TaskState::Running => "▶️",
             TaskState::Idle => "?",
-            TaskState::Dropped => "⏹",
+            TaskState::Completed => "⏹",
         };
 
         html! {
@@ -354,12 +354,21 @@ impl Task {
                         }
                     </code>
                 </td>
-                // total
-                <td>"..."</td>
-                // busy
-                <td>"..."</td>
-                // idle
-                <td>"..."</td>
+                <td>
+                    if let Some(created_at) = self.stats.as_ref().and_then(|s| s.created_at) {
+                        { format!("{:?}", created_at.elapsed().unwrap()) }
+                    }
+                </td>
+                <td>
+                    if let Some(busy) = self.stats.as_ref().and_then(|s| s.busy_time) {
+                        { format!("{:?}", busy) }
+                    }
+                </td>
+                <td>
+                    if let Some(idle) = self.stats.as_ref().and_then(|s| s.idle_time()) {
+                        { format!("{:?}", idle) }
+                    }
+                </td>
                 <td>
                     if let Some(stats) = &self.stats {
                         { stats.polls }
@@ -375,7 +384,6 @@ impl Task {
                         { self.location.render() }
                     </code>
                 </td>
-                // fields
                 <td>
                     for (name, value) in self.fields.iter().filter(|(name, _)| name != &"task.name") {
                         <code>
@@ -398,7 +406,7 @@ impl Task {
     fn state(&self) -> TaskState {
         if let Some(stats) = &self.stats {
             if stats.dropped_at.is_some() {
-                TaskState::Dropped
+                TaskState::Completed
             } else {
                 TaskState::Running
             }
@@ -411,7 +419,7 @@ impl Task {
 enum TaskState {
     Running,
     Idle,
-    Dropped,
+    Completed,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -498,21 +506,10 @@ fn truncate_registry_path(s: String) -> String {
 
 #[derive(Deserialize, Serialize, Debug)]
 struct Stats {
-    #[serde(with = "chrono::serde::ts_nanoseconds")]
-    created_at: DateTime<Utc>,
-    #[serde(with = "chrono::serde::ts_nanoseconds_option")]
-    dropped_at: Option<DateTime<Utc>>,
-    wakes: u64,
-    waker_clones: u64,
-    waker_drops: u64,
-    #[serde(with = "chrono::serde::ts_nanoseconds_option")]
-    last_wake: Option<DateTime<Utc>>,
-    self_wakes: u64,
+    dropped_at: Option<SystemTime>,
+    created_at: Option<SystemTime>,
+    busy_time: Option<Duration>,
     polls: u64,
-    // first_poll: Option<Timestamp>,
-    // last_poll_started: Option<Timestamp>,
-    // last_poll_ended: Option<Timestamp>,
-    // busy_time: Option<Duration>,
 }
 
 impl TryFrom<console_api::tasks::Stats> for Stats {
@@ -522,34 +519,37 @@ impl TryFrom<console_api::tasks::Stats> for Stats {
         let console_api::tasks::Stats {
             created_at,
             dropped_at,
-            wakes,
-            waker_clones,
-            waker_drops,
-            last_wake,
-            self_wakes,
-            poll_stats: _,
+            wakes: _,
+            waker_clones: _,
+            waker_drops: _,
+            last_wake: _,
+            self_wakes: _,
+            poll_stats,
         } = stats;
 
-        let created_at = created_at.context("Missing `created_at` field")?;
-        let created_at = Utc.timestamp(created_at.seconds, created_at.nanos as _);
+        let created_at = created_at.map(SystemTime::try_from).transpose()?;
+        let dropped_at = dropped_at.map(SystemTime::try_from).transpose()?;
 
-        let dropped_at =
-            dropped_at.map(|dropped_at| Utc.timestamp(dropped_at.seconds, dropped_at.nanos as _));
+        let poll_stats = poll_stats.context("Missing `poll_stats` field")?;
 
-        let last_wake =
-            last_wake.map(|last_wake| Utc.timestamp(last_wake.seconds, last_wake.nanos as _));
-
-        let poll_stats = stats.poll_stats.context("Missing `poll_stats` field")?;
+        let polls = poll_stats.polls;
+        let busy_time = poll_stats
+            .busy_time
+            .map(|d| Duration::new(d.seconds as _, d.nanos as _));
 
         Ok(Self {
-            created_at,
             dropped_at,
-            wakes,
-            waker_clones,
-            waker_drops,
-            last_wake,
-            self_wakes,
-            polls: poll_stats.polls,
+            created_at,
+            polls,
+            busy_time,
         })
+    }
+}
+
+impl Stats {
+    fn idle_time(&self) -> Option<Duration> {
+        let created_at = self.created_at?.elapsed().ok()?;
+        let busy_time = self.busy_time?;
+        Some(created_at - busy_time)
     }
 }
