@@ -3,7 +3,10 @@ use anyhow::Context as _;
 use axum_liveview::{html, pubsub::Bincode, Html, LiveView, ShouldRender};
 use chrono::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+};
 use uuid::Uuid;
 
 pub struct TasksIndex {
@@ -12,6 +15,7 @@ pub struct TasksIndex {
     id: Uuid,
     connection_state: ConnectionState,
     tasks: BTreeMap<Id, Task>,
+    metadata: HashMap<MetaId, Metadata>,
 }
 
 impl LiveView for TasksIndex {
@@ -110,6 +114,7 @@ impl TasksIndex {
             id,
             connection_state: ConnectionState::Connected,
             tasks: Default::default(),
+            metadata: Default::default(),
         }
     }
 
@@ -118,6 +123,7 @@ impl TasksIndex {
             Msg::Update(Update {
                 new_tasks,
                 stats_update,
+                new_metadata,
             }) => {
                 for task in new_tasks {
                     self.tasks.insert(task.id, task);
@@ -126,6 +132,14 @@ impl TasksIndex {
                 for (id, stats) in stats_update {
                     if let Some(task) = self.tasks.get_mut(&id) {
                         task.stats = Some(stats);
+                    }
+                }
+
+                self.metadata.extend(new_metadata);
+
+                for task in self.tasks.values_mut() {
+                    if let Some(metadata) = self.metadata.get(&task.metadata_id) {
+                        task.target = Some(metadata.target.clone());
                     }
                 }
             }
@@ -181,6 +195,7 @@ enum ConnectionState {
 pub struct Update {
     new_tasks: Vec<Task>,
     stats_update: BTreeMap<Id, Stats>,
+    new_metadata: HashMap<MetaId, Metadata>,
 }
 
 impl TryFrom<console_api::instrument::Update> for Update {
@@ -192,8 +207,15 @@ impl TryFrom<console_api::instrument::Update> for Update {
             task_update,
             resource_update: _,
             async_op_update: _,
-            new_metadata: _,
+            new_metadata,
         } = update;
+
+        let new_metadata = new_metadata
+            .unwrap_or_default()
+            .metadata
+            .into_iter()
+            .map(|meta| Metadata::try_from(meta).map(|meta| (meta.id, meta)))
+            .collect::<anyhow::Result<_>>()?;
 
         let console_api::tasks::TaskUpdate {
             new_tasks,
@@ -214,7 +236,32 @@ impl TryFrom<console_api::instrument::Update> for Update {
         Ok(Self {
             new_tasks,
             stats_update,
+            new_metadata,
         })
+    }
+}
+
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct MetaId(u64);
+
+#[derive(Deserialize, Serialize, Debug)]
+struct Metadata {
+    id: MetaId,
+    name: String,
+    target: String,
+}
+
+impl TryFrom<console_api::register_metadata::NewMetadata> for Metadata {
+    type Error = anyhow::Error;
+
+    fn try_from(meta: console_api::register_metadata::NewMetadata) -> Result<Self, Self::Error> {
+        let id = MetaId(meta.id.context("Missing `id` field")?.id);
+
+        let meta = meta.metadata.context("Missing `meta` field")?;
+        let name = meta.name;
+        let target = meta.target;
+
+        Ok(Self { id, name, target })
     }
 }
 
@@ -224,6 +271,8 @@ struct Task {
     fields: BTreeMap<String, FieldValue>,
     location: Location,
     stats: Option<Stats>,
+    metadata_id: MetaId,
+    target: Option<String>,
 }
 
 impl TryFrom<console_api::tasks::Task> for Task {
@@ -232,7 +281,7 @@ impl TryFrom<console_api::tasks::Task> for Task {
     fn try_from(task: console_api::tasks::Task) -> Result<Self, Self::Error> {
         let console_api::tasks::Task {
             id,
-            metadata: _,
+            metadata,
             kind: _,
             fields,
             parents: _,
@@ -241,6 +290,8 @@ impl TryFrom<console_api::tasks::Task> for Task {
 
         let id = id.context("Missing `id` field")?;
         let id = Id(id.id);
+
+        let metadata_id = MetaId(metadata.context("Missing `metadata` field")?.id);
 
         let fields = fields
             .into_iter()
@@ -271,6 +322,8 @@ impl TryFrom<console_api::tasks::Task> for Task {
             fields,
             location,
             stats: None,
+            metadata_id,
+            target: None,
         })
     }
 }
@@ -312,8 +365,11 @@ impl Task {
                         { stats.polls }
                     }
                 </td>
-                // target
-                <td>"..."</td>
+                <td>
+                    if let Some(target) = &self.target {
+                        <code>{ target }</code>
+                    }
+                </td>
                 <td>
                     <code>
                         { self.location.render() }
