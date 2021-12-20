@@ -1,5 +1,5 @@
 use crate::cancel_on_drop::CancelOnDropChildToken;
-use crate::views::tasks_index;
+use crate::views::{connection_state, resources_index, tasks_index, TaskResourceLayout};
 use crate::InstrumentClient;
 use crate::{cancel_on_drop::CancelOnDrop, views::Layout};
 use axum::{
@@ -11,7 +11,6 @@ use axum::{
     Router,
 };
 use axum_liveview::pubsub::Bincode;
-use axum_liveview::Html;
 use axum_liveview::{
     html,
     pubsub::{InProcess, PubSub},
@@ -82,7 +81,7 @@ fn open_console() -> Router {
 
 fn tasks_index() -> Router {
     async fn handler(
-        layout: Layout,
+        layout: TaskResourceLayout,
         live: LiveViewManager,
         ConnectedClient(client): ConnectedClient,
         Extension(pubsub): Extension<InProcess>,
@@ -90,19 +89,21 @@ fn tasks_index() -> Router {
     ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
         let token = CancelOnDrop::new();
 
-        let id = Uuid::new_v4();
+        let stream_id = Uuid::new_v4();
 
-        tokio::spawn(process_tasks_index_stream(
+        tokio::spawn(process_tasks_index_stream::<tasks_index::Update>(
             token.child(),
             client,
             pubsub,
-            id,
+            stream_id,
+            tasks_index::msg_topic(stream_id),
         ));
 
-        let view = tasks_index::TasksIndex::new(token, addr.clone(), id);
+        let connection_state = connection_state::ConnectionState::new(stream_id, addr);
+        let view = tasks_index::TasksIndex::new(token, stream_id);
 
         Ok(layout.render(html! {
-            { task_resource_menu(&addr) }
+            { live.embed(connection_state) }
             { live.embed(view) }
         }))
     }
@@ -111,34 +112,51 @@ fn tasks_index() -> Router {
 }
 
 fn resources_index() -> Router {
-    async fn handler(layout: Layout, Path(addr): Path<ConsoleAddr>) -> impl IntoResponse {
+    async fn handler(
+        layout: TaskResourceLayout,
+        live: LiveViewManager,
+        ConnectedClient(client): ConnectedClient,
+        Extension(pubsub): Extension<InProcess>,
+        Path(addr): Path<ConsoleAddr>,
+    ) -> impl IntoResponse {
+        let token = CancelOnDrop::new();
+        let stream_id = Uuid::new_v4();
+
+        tokio::spawn(process_tasks_index_stream::<resources_index::Update>(
+            token.child(),
+            client,
+            pubsub,
+            stream_id,
+            resources_index::msg_topic(stream_id),
+        ));
+
+        let connection_state = connection_state::ConnectionState::new(stream_id, addr);
+        let view = resources_index::ResourcesIndex::new(token, stream_id);
+
         layout.render(html! {
-            { task_resource_menu(&addr) }
-            "TODO"
+            { live.embed(connection_state) }
+            { live.embed(view) }
         })
     }
 
     Router::new().route("/console/:ip/:port/resources", get(handler))
 }
 
-fn task_resource_menu(addr: &ConsoleAddr) -> Html {
-    html! {
-        <hr />
-        <nav>
-            <a href={ format!("/console/{}/{}/tasks", addr.ip, addr.port) }>"Tasks"</a>
-            " | "
-            <a href={ format!("/console/{}/{}/resources", addr.ip, addr.port) }>"Resources"</a>
-        </nav>
-    }
-}
-
 #[allow(irrefutable_let_patterns)]
-async fn process_tasks_index_stream(
+async fn process_tasks_index_stream<T>(
     token: CancelOnDropChildToken,
     mut client: InstrumentClient,
     pubsub: InProcess,
-    id: Uuid,
-) {
+    stream_id: Uuid,
+    message_topic: String,
+) where
+    T: TryFrom<console_api::instrument::Update, Error = anyhow::Error>
+        + serde::Serialize
+        + serde::de::DeserializeOwned
+        + Send
+        + Sync
+        + 'static,
+{
     use console_api::instrument::InstrumentRequest;
 
     let process_stream = async move {
@@ -149,8 +167,8 @@ async fn process_tasks_index_stream(
                 let message = err.message().to_owned();
                 let _ = pubsub
                     .broadcast(
-                        &tasks_index::msg_topic(id),
-                        Bincode(tasks_index::Msg::Error { code, message }),
+                        &connection_state::msg_topic(stream_id),
+                        Bincode(connection_state::Msg::Error { code, message }),
                     )
                     .await;
                 return;
@@ -159,14 +177,9 @@ async fn process_tasks_index_stream(
 
         while let msg = stream.message().await {
             match msg {
-                Ok(Some(msg)) => match msg.try_into() {
+                Ok(Some(msg)) => match T::try_from(msg) {
                     Ok(msg) => {
-                        let _ = pubsub
-                            .broadcast(
-                                &tasks_index::msg_topic(id),
-                                Bincode(tasks_index::Msg::Update(msg)),
-                            )
-                            .await;
+                        let _ = pubsub.broadcast(&message_topic, Bincode(msg)).await;
                     }
                     Err(err) => {
                         tracing::error!(%err, "failed to convert gRPC message");
@@ -176,8 +189,8 @@ async fn process_tasks_index_stream(
                 Ok(None) => {
                     let _ = pubsub
                         .broadcast(
-                            &tasks_index::msg_topic(id),
-                            Bincode(tasks_index::Msg::StreamEnded),
+                            &connection_state::msg_topic(stream_id),
+                            Bincode(connection_state::Msg::StreamEnded),
                         )
                         .await;
                     break;
@@ -187,8 +200,8 @@ async fn process_tasks_index_stream(
                     let message = err.message().to_owned();
                     let _ = pubsub
                         .broadcast(
-                            &tasks_index::msg_topic(id),
-                            Bincode(tasks_index::Msg::Error { code, message }),
+                            &connection_state::msg_topic(stream_id),
+                            Bincode(connection_state::Msg::Error { code, message }),
                         )
                         .await;
                     break;

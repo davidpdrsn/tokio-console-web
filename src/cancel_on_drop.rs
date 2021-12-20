@@ -30,10 +30,4 @@ impl CancelOnDropChildToken {
     pub async fn cancelled(self) {
         self.inner.cancelled().await
     }
-
-    pub fn child(&self) -> CancelOnDropChildToken {
-        CancelOnDropChildToken {
-            inner: self.inner.clone(),
-        }
-    }
 }

@@ -1,4 +1,4 @@
-use crate::{cancel_on_drop::CancelOnDrop, routes::ConsoleAddr};
+use crate::cancel_on_drop::CancelOnDrop;
 use anyhow::Context as _;
 use axum_liveview::{html, pubsub::Bincode, Html, LiveView, ShouldRender};
 use serde::{Deserialize, Serialize};
@@ -11,38 +11,18 @@ use uuid::Uuid;
 
 pub struct TasksIndex {
     _token: CancelOnDrop,
-    addr: ConsoleAddr,
-    id: Uuid,
-    connection_state: ConnectionState,
+    stream_id: Uuid,
     tasks: BTreeMap<Id, Task>,
     metadata: HashMap<MetaId, Metadata>,
 }
 
 impl LiveView for TasksIndex {
     fn setup(&self, setup: &mut axum_liveview::Setup<Self>) {
-        setup.on_broadcast(&msg_topic(self.id), Self::msg);
+        setup.on_broadcast(&msg_topic(self.stream_id), Self::msg);
         setup.on_broadcast("tick", Self::tick);
     }
 
     fn render(&self) -> Html {
-        // TODO(david): extract this so we can also show it on the resources screen
-        let connection_state = match &self.connection_state {
-            ConnectionState::Connected => html! {
-                "Connection: " { &self.addr.ip } ":" { &self.addr.port }
-            },
-            ConnectionState::StreamEnded => html! {
-                "Stream ended unexpectedly..."
-            },
-            ConnectionState::Error { code, message } => html! {
-                "Stream encountered an error:"
-                <div>
-                    <code>
-                        "code=" { code } "; message=" { message }
-                    </code>
-                </div>
-            },
-        };
-
         let mut total = 0;
         let mut running = 0;
         let mut idle = 0;
@@ -57,8 +37,6 @@ impl LiveView for TasksIndex {
         }
 
         html! {
-            <div>{ connection_state }</div>
-
             <div>
                 if self.tasks.is_empty() {
                     "Loading..."
@@ -107,47 +85,37 @@ impl LiveView for TasksIndex {
 }
 
 impl TasksIndex {
-    pub fn new(token: CancelOnDrop, addr: ConsoleAddr, id: Uuid) -> Self {
+    pub fn new(token: CancelOnDrop, id: Uuid) -> Self {
         Self {
             _token: token,
-            addr,
-            id,
-            connection_state: ConnectionState::Connected,
+            stream_id: id,
             tasks: Default::default(),
             metadata: Default::default(),
         }
     }
 
-    async fn msg(mut self, Bincode(msg): Bincode<Msg>) -> ShouldRender<Self> {
-        match msg {
-            Msg::Update(Update {
-                new_tasks,
-                stats_update,
-                new_metadata,
-            }) => {
-                for task in new_tasks {
-                    self.tasks.insert(task.id, task);
-                }
+    async fn msg(mut self, Bincode(msg): Bincode<Update>) -> ShouldRender<Self> {
+        let Update {
+            new_tasks,
+            stats_update,
+            new_metadata,
+        } = msg;
 
-                for (id, stats) in stats_update {
-                    if let Some(task) = self.tasks.get_mut(&id) {
-                        task.stats = Some(stats);
-                    }
-                }
+        for task in new_tasks {
+            self.tasks.insert(task.id, task);
+        }
 
-                self.metadata.extend(new_metadata);
-
-                for task in self.tasks.values_mut() {
-                    if let Some(metadata) = self.metadata.get(&task.metadata_id) {
-                        task.target = Some(metadata.target.clone());
-                    }
-                }
+        for (id, stats) in stats_update {
+            if let Some(task) = self.tasks.get_mut(&id) {
+                task.stats = Some(stats);
             }
-            Msg::StreamEnded => {
-                self.connection_state = ConnectionState::StreamEnded;
-            }
-            Msg::Error { code, message } => {
-                self.connection_state = ConnectionState::Error { code, message };
+        }
+
+        self.metadata.extend(new_metadata);
+
+        for task in self.tasks.values_mut() {
+            if let Some(metadata) = self.metadata.get(&task.metadata_id) {
+                task.target = Some(metadata.target.clone());
             }
         }
 
@@ -174,21 +142,8 @@ impl TasksIndex {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
-pub enum Msg {
-    Update(Update),
-    StreamEnded,
-    Error { code: i32, message: String },
-}
-
 pub fn msg_topic(id: Uuid) -> String {
     format!("tasks-index/msg/{}", id)
-}
-
-enum ConnectionState {
-    Connected,
-    StreamEnded,
-    Error { code: i32, message: String },
 }
 
 #[derive(Deserialize, Serialize, Debug)]
