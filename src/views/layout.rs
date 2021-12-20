@@ -28,8 +28,10 @@ impl Layout {
                                 padding: 3px;
                             }
 
-                            table.tasks-table tr:nth-child(even) {
-                                background: #ddd;
+                            table.tasks-table tr:nth-child(even)
+                            , table.resources-table tr:nth-child(even)
+                            {
+                                background: #eee;
                             }
                         "#
                     </style>

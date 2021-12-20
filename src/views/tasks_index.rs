@@ -1,3 +1,4 @@
+use super::{Location, MetaId, Metadata};
 use crate::cancel_on_drop::CancelOnDrop;
 use anyhow::Context as _;
 use axum_liveview::{html, pubsub::Bincode, Html, LiveView, ShouldRender};
@@ -12,14 +13,16 @@ use uuid::Uuid;
 pub struct TasksIndex {
     _token: CancelOnDrop,
     stream_id: Uuid,
-    tasks: BTreeMap<Id, Task>,
+    tasks: BTreeMap<TaskId, Task>,
     metadata: HashMap<MetaId, Metadata>,
+    paused: bool,
 }
 
 impl LiveView for TasksIndex {
     fn setup(&self, setup: &mut axum_liveview::Setup<Self>) {
         setup.on_broadcast(&msg_topic(self.stream_id), Self::msg);
         setup.on_broadcast("tick", Self::tick);
+        setup.on("toggle-play-pause", Self::toggle_play_pause);
     }
 
     fn render(&self) -> Html {
@@ -56,7 +59,13 @@ impl LiveView for TasksIndex {
                             ", completed: " { completed }
                         }
                     </div>
-                    <hr />
+                    <div>
+                        if self.paused {
+                            <button live-click="toggle-play-pause">"Play"</button>
+                        } else {
+                            <button live-click="toggle-play-pause">"Pause"</button>
+                        }
+                    </div>
                     <table class="tasks-table">
                         <thead>
                             <tr>
@@ -73,7 +82,7 @@ impl LiveView for TasksIndex {
                             </tr>
                         </thead>
                         <tbody>
-                            for (_, task) in &self.tasks {
+                            for task in self.tasks.values() {
                                 { task.render_as_table_row() }
                             }
                         </tbody>
@@ -91,6 +100,7 @@ impl TasksIndex {
             stream_id: id,
             tasks: Default::default(),
             metadata: Default::default(),
+            paused: false,
         }
     }
 
@@ -122,12 +132,21 @@ impl TasksIndex {
         ShouldRender::No(self)
     }
 
-    async fn tick(mut self) -> Self {
-        self.reap_tasks();
+    async fn tick(mut self) -> ShouldRender<Self> {
+        if self.paused {
+            ShouldRender::No(self)
+        } else {
+            self.reap();
+            ShouldRender::Yes(self)
+        }
+    }
+
+    async fn toggle_play_pause(mut self) -> Self {
+        self.paused = !self.paused;
         self
     }
 
-    fn reap_tasks(&mut self) {
+    fn reap(&mut self) {
         self.tasks.retain(|_id, task| {
             if let Some(stats) = &task.stats {
                 if let Some(dropped_at) = stats.dropped_at {
@@ -149,7 +168,7 @@ pub fn msg_topic(id: Uuid) -> String {
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Update {
     new_tasks: Vec<Task>,
-    stats_update: BTreeMap<Id, Stats>,
+    stats_update: BTreeMap<TaskId, Stats>,
     new_metadata: HashMap<MetaId, Metadata>,
 }
 
@@ -158,11 +177,9 @@ impl TryFrom<console_api::instrument::Update> for Update {
 
     fn try_from(update: console_api::instrument::Update) -> Result<Self, Self::Error> {
         let console_api::instrument::Update {
-            now: _,
             task_update,
-            resource_update: _,
-            async_op_update: _,
             new_metadata,
+            ..
         } = update;
 
         let new_metadata = new_metadata
@@ -185,7 +202,7 @@ impl TryFrom<console_api::instrument::Update> for Update {
 
         let stats_update = stats_update
             .into_iter()
-            .map(|(id, stats)| Ok((Id(id), stats.try_into()?)))
+            .map(|(id, stats)| Ok((TaskId(id), stats.try_into()?)))
             .collect::<anyhow::Result<_>>()?;
 
         Ok(Self {
@@ -196,33 +213,9 @@ impl TryFrom<console_api::instrument::Update> for Update {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct MetaId(u64);
-
-#[derive(Deserialize, Serialize, Debug)]
-struct Metadata {
-    id: MetaId,
-    name: String,
-    target: String,
-}
-
-impl TryFrom<console_api::register_metadata::NewMetadata> for Metadata {
-    type Error = anyhow::Error;
-
-    fn try_from(meta: console_api::register_metadata::NewMetadata) -> Result<Self, Self::Error> {
-        let id = MetaId(meta.id.context("Missing `id` field")?.id);
-
-        let meta = meta.metadata.context("Missing `meta` field")?;
-        let name = meta.name;
-        let target = meta.target;
-
-        Ok(Self { id, name, target })
-    }
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 struct Task {
-    id: Id,
+    id: TaskId,
     fields: BTreeMap<String, FieldValue>,
     location: Location,
     stats: Option<Stats>,
@@ -244,7 +237,7 @@ impl TryFrom<console_api::tasks::Task> for Task {
         } = task;
 
         let id = id.context("Missing `id` field")?;
-        let id = Id(id.id);
+        let id = TaskId(id.id);
 
         let metadata_id = MetaId(metadata.context("Missing `metadata` field")?.id);
 
@@ -284,7 +277,7 @@ impl TryFrom<console_api::tasks::Task> for Task {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct Id(u64);
+struct TaskId(u64);
 
 impl Task {
     fn render_as_table_row(&self) -> Html {
@@ -427,55 +420,6 @@ impl From<console_api::field::Value> for FieldValue {
             console_api::field::Value::I64Val(inner) => Self::I64(inner),
             console_api::field::Value::BoolVal(inner) => Self::Bool(inner),
         }
-    }
-}
-
-#[derive(Deserialize, Serialize, Debug)]
-struct Location {
-    file: String,
-    module_path: Option<String>,
-    line: u32,
-    column: u32,
-}
-
-impl Location {
-    fn render(&self) -> Html {
-        html! {
-            { &self.file } ":" { self.line } ":" { self.column }
-        }
-    }
-}
-
-impl TryFrom<console_api::Location> for Location {
-    type Error = anyhow::Error;
-
-    fn try_from(location: console_api::Location) -> Result<Self, Self::Error> {
-        Ok(Self {
-            file: location
-                .file
-                .context("Missing `file` field")
-                .map(truncate_registry_path)?,
-            module_path: location.module_path,
-            line: location.line.context("Missing `line` field")?,
-            column: location.column.context("Missing `column` field")?,
-        })
-    }
-}
-
-fn truncate_registry_path(s: String) -> String {
-    use once_cell::sync::OnceCell;
-    use regex::Regex;
-    use std::borrow::Cow;
-
-    static REGEX: OnceCell<Regex> = OnceCell::new();
-    let regex = REGEX.get_or_init(|| {
-        Regex::new(r#".*/\.cargo(/registry/src/[^/]*/|/git/checkouts/)"#)
-            .expect("failed to compile regex")
-    });
-
-    match regex.replace(&s, "{cargo}/") {
-        Cow::Owned(s) => s,
-        Cow::Borrowed(_) => s.to_string(),
     }
 }
 
