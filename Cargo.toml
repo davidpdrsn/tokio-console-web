@@ -1,0 +1,15 @@
+[package]
+name = "tokio-console-web"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.4"
+axum-liveview = { git = "https://github.com/davidpdrsn/axum-liveview" }
+clap = { version = "3.0.0-rc.7", features = ["derive", "env"] }
+console-api = "0.1.0"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = "0.4"
