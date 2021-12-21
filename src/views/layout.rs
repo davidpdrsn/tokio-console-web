@@ -29,9 +29,20 @@ impl Layout {
                             }
 
                             table.tasks-table tr:nth-child(even)
-                            , table.resources-table tr:nth-child(even)
-                            {
+                            , table.resources-table tr:nth-child(even) {
                                 background: #eee;
+                            }
+
+                            table.tasks-table tr[live-click]
+                            , table.resources-table tr[live-click]
+                            {
+                                cursor: pointer;
+                            }
+
+                            table.tasks-table tr[live-click]:hover
+                            , table.resources-table tr[live-click]:hover
+                            {
+                                background: #ddd;
                             }
                         "#
                     </style>

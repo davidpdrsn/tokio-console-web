@@ -1,4 +1,4 @@
-use axum::{AddExtensionLayer, Router};
+use axum::Router;
 use axum_liveview::{pubsub::InProcess, PubSub};
 use clap::Parser;
 use std::{net::SocketAddr, time::Duration};
@@ -46,8 +46,8 @@ async fn main() -> anyhow::Result<()> {
         .merge(axum_liveview::routes())
         .layer(
             ServiceBuilder::new()
-                .layer(AddExtensionLayer::new(Port(config.bind_addr.port())))
-                .layer(AddExtensionLayer::new(pubsub.clone()))
+                .add_extension(Port(config.bind_addr.port()))
+                .add_extension(pubsub.clone())
                 .layer(axum_liveview::layer(pubsub))
                 .trace_for_http(),
         );

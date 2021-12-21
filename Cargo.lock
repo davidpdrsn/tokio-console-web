@@ -125,7 +125,7 @@ dependencies = [
 [[package]]
 name = "axum-liveview"
 version = "0.1.0"
-source = "git+https://github.com/davidpdrsn/axum-liveview#4152dd58be0b77ca677b94ab66228ee0269ea08c"
+source = "git+https://github.com/davidpdrsn/axum-liveview#636f9db1e7cf9e353bdb7a34a80491aca9c7f5f3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -152,7 +152,7 @@ dependencies = [
 [[package]]
 name = "axum-liveview-macros"
 version = "0.1.0"
-source = "git+https://github.com/davidpdrsn/axum-liveview#4152dd58be0b77ca677b94ab66228ee0269ea08c"
+source = "git+https://github.com/davidpdrsn/axum-liveview#636f9db1e7cf9e353bdb7a34a80491aca9c7f5f3"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1208,6 +1208,7 @@ dependencies = [
  "once_cell",
  "regex",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tonic",

@@ -2,6 +2,7 @@ use crate::cancel_on_drop::CancelOnDropChildToken;
 use crate::views::{connection_state, resources_index, tasks_index, TaskResourceLayout};
 use crate::InstrumentClient;
 use crate::{cancel_on_drop::CancelOnDrop, views::Layout};
+use axum::routing::MethodRouter;
 use axum::{
     async_trait,
     extract::{Extension, FromRequest, Path, Query, RequestParts},
@@ -26,7 +27,13 @@ pub fn all() -> Router {
         .merge(root())
         .merge(open_console())
         .merge(tasks_index())
+        .merge(tasks_show())
         .merge(resources_index())
+        .merge(resources_show())
+}
+
+fn route(path: &str, method_router: MethodRouter) -> Router {
+    Router::new().route(path, method_router)
 }
 
 fn root() -> Router {
@@ -52,7 +59,7 @@ fn root() -> Router {
         })
     }
 
-    Router::new().route("/", get(handler))
+    route("/", get(handler))
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -76,7 +83,7 @@ fn open_console() -> Router {
         Ok(Redirect::to(uri))
     }
 
-    Router::new().route("/open-console", get(handler))
+    route("/open-console", get(handler))
 }
 
 fn tasks_index() -> Router {
@@ -99,8 +106,8 @@ fn tasks_index() -> Router {
             tasks_index::msg_topic(stream_id),
         ));
 
-        let connection_state = connection_state::ConnectionState::new(stream_id, addr);
-        let view = tasks_index::TasksIndex::new(token, stream_id);
+        let connection_state = connection_state::ConnectionState::new(stream_id, addr.clone());
+        let view = tasks_index::TasksIndex::new(token, stream_id, addr);
 
         Ok(layout.render(html! {
             { live.embed(connection_state) }
@@ -108,7 +115,7 @@ fn tasks_index() -> Router {
         }))
     }
 
-    Router::new().route("/console/:ip/:port/tasks", get(handler))
+    route("/console/:ip/:port/tasks", get(handler))
 }
 
 fn resources_index() -> Router {
@@ -130,8 +137,8 @@ fn resources_index() -> Router {
             resources_index::msg_topic(stream_id),
         ));
 
-        let connection_state = connection_state::ConnectionState::new(stream_id, addr);
-        let view = resources_index::ResourcesIndex::new(token, stream_id);
+        let connection_state = connection_state::ConnectionState::new(stream_id, addr.clone());
+        let view = resources_index::ResourcesIndex::new(token, stream_id, addr);
 
         layout.render(html! {
             { live.embed(connection_state) }
@@ -139,7 +146,7 @@ fn resources_index() -> Router {
         })
     }
 
-    Router::new().route("/console/:ip/:port/resources", get(handler))
+    route("/console/:ip/:port/resources", get(handler))
 }
 
 #[allow(irrefutable_let_patterns)]
@@ -216,6 +223,26 @@ async fn process_tasks_index_stream<T>(
             tracing::trace!("ending watch_update stream");
         }
     }
+}
+
+fn tasks_show() -> Router {
+    async fn handler(layout: Layout) -> impl IntoResponse {
+        layout.render(html! {
+            "tasks#show"
+        })
+    }
+
+    route("/console/:ip/:port/tasks/:task_id", get(handler))
+}
+
+fn resources_show() -> Router {
+    async fn handler(layout: Layout) -> impl IntoResponse {
+        layout.render(html! {
+            "resources#show"
+        })
+    }
+
+    route("/console/:ip/:port/resources/:resource_id", get(handler))
 }
 
 struct ConnectedClient(InstrumentClient);

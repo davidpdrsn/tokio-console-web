@@ -1,12 +1,12 @@
+use anyhow::Context;
+use axum_liveview::{html, Html};
+use serde::{Deserialize, Serialize};
+
 pub mod connection_state;
 pub mod resources_index;
 pub mod tasks_index;
 
 mod layout;
-
-use anyhow::Context;
-use axum_liveview::{html, Html};
-use serde::{Deserialize, Serialize};
 
 pub use self::layout::{Layout, TaskResourceLayout};
 

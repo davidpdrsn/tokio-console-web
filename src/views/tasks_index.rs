@@ -1,8 +1,10 @@
 use super::{Location, MetaId, Metadata};
-use crate::cancel_on_drop::CancelOnDrop;
+use crate::{cancel_on_drop::CancelOnDrop, routes::ConsoleAddr};
 use anyhow::Context as _;
-use axum_liveview::{html, pubsub::Bincode, Html, LiveView, ShouldRender};
+use axum::Json;
+use axum_liveview::{html, pubsub::Bincode, Html, LiveView, RenderResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -16,6 +18,7 @@ pub struct TasksIndex {
     tasks: BTreeMap<TaskId, Task>,
     metadata: HashMap<MetaId, Metadata>,
     paused: bool,
+    addr: ConsoleAddr,
 }
 
 impl LiveView for TasksIndex {
@@ -23,6 +26,7 @@ impl LiveView for TasksIndex {
         setup.on_broadcast(&msg_topic(self.stream_id), Self::msg);
         setup.on_broadcast("tick", Self::tick);
         setup.on("toggle-play-pause", Self::toggle_play_pause);
+        setup.on("row-click", Self::row_click);
     }
 
     fn render(&self) -> Html {
@@ -94,17 +98,18 @@ impl LiveView for TasksIndex {
 }
 
 impl TasksIndex {
-    pub fn new(token: CancelOnDrop, id: Uuid) -> Self {
+    pub fn new(token: CancelOnDrop, id: Uuid, addr: ConsoleAddr) -> Self {
         Self {
             _token: token,
             stream_id: id,
             tasks: Default::default(),
             metadata: Default::default(),
             paused: false,
+            addr,
         }
     }
 
-    async fn msg(mut self, Bincode(msg): Bincode<Update>) -> ShouldRender<Self> {
+    async fn msg(mut self, Bincode(msg): Bincode<Update>) -> RenderResult<Self> {
         let Update {
             new_tasks,
             stats_update,
@@ -129,21 +134,40 @@ impl TasksIndex {
             }
         }
 
-        ShouldRender::No(self)
+        RenderResult::dont_render(self)
     }
 
-    async fn tick(mut self) -> ShouldRender<Self> {
+    async fn tick(mut self) -> RenderResult<Self> {
         if self.paused {
-            ShouldRender::No(self)
+            RenderResult::dont_render(self)
         } else {
             self.reap();
-            ShouldRender::Yes(self)
+            RenderResult::render(self)
         }
     }
 
     async fn toggle_play_pause(mut self) -> Self {
         self.paused = !self.paused;
         self
+    }
+
+    async fn row_click(self, Json(data): axum::Json<Value>) -> RenderResult<Self> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct Data {
+            task_id: String,
+        }
+
+        let data = serde_json::from_value::<Data>(data).unwrap();
+
+        let uri = format!(
+            "/console/{}/{}/tasks/{}",
+            self.addr.ip, self.addr.port, data.task_id
+        )
+        .parse()
+        .expect("invalid URI");
+
+        RenderResult::navigate_to(uri)
     }
 
     fn reap(&mut self) {
@@ -288,7 +312,7 @@ impl Task {
         };
 
         html! {
-            <tr>
+            <tr live-click="row-click" live-data-task-id={ self.id.0 }>
                 <td>
                     { self.id.0 }
                 </td>
