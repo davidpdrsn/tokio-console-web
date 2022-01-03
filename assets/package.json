@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "axum-live-view": "file:/Users/davidpdrsn/dev/major/axum-live-view/assets"
+  },
+  "private": true,
+  "devDependencies": {
+    "webpack-cli": "^4.9.1"
+  }
+}

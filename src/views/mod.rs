@@ -1,5 +1,5 @@
 use anyhow::Context;
-use axum_liveview::{html, Html};
+use axum_live_view::{html, Html};
 use serde::{Deserialize, Serialize};
 
 pub mod connection_state;
@@ -19,7 +19,7 @@ struct Location {
 }
 
 impl Location {
-    fn render(&self) -> Html {
+    fn render<T>(&self) -> Html<T> {
         html! {
             { &self.file } ":" { self.line } ":" { self.column }
         }

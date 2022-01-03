@@ -2,7 +2,9 @@ use crate::cancel_on_drop::CancelOnDropChildToken;
 use crate::views::{connection_state, resources_index, tasks_index, TaskResourceLayout};
 use crate::InstrumentClient;
 use crate::{cancel_on_drop::CancelOnDrop, views::Layout};
+use axum::response::Headers;
 use axum::routing::MethodRouter;
+use axum::Json;
 use axum::{
     async_trait,
     extract::{Extension, FromRequest, Path, Query, RequestParts},
@@ -11,12 +13,8 @@ use axum::{
     routing::get,
     Router,
 };
-use axum_liveview::pubsub::Bincode;
-use axum_liveview::{
-    html,
-    pubsub::{InProcess, PubSub},
-    LiveViewManager,
-};
+use axum_live_view::pubsub::{InProcess, PubSub, Topic};
+use axum_live_view::{html, EmbedLiveView};
 use serde::Deserialize;
 use std::net::SocketAddr;
 use tonic::transport::Endpoint;
@@ -24,21 +22,33 @@ use uuid::Uuid;
 
 pub fn all() -> Router {
     Router::new()
+        .merge(assets())
         .merge(root())
         .merge(open_console())
         .merge(tasks_index())
-        .merge(tasks_show())
         .merge(resources_index())
-        .merge(resources_show())
 }
 
 fn route(path: &str, method_router: MethodRouter) -> Router {
     Router::new().route(path, method_router)
 }
 
+fn assets() -> Router {
+    async fn bundle_js() -> impl IntoResponse {
+        const JS: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/assets/dist/bundle.js"
+        ));
+        let headers = Headers([(axum::http::header::CONTENT_TYPE, "application/javascript")]);
+        (headers, JS)
+    }
+
+    Router::new().nest("/assets", Router::new().route("/bundle.js", get(bundle_js)))
+}
+
 fn root() -> Router {
     async fn handler(layout: Layout) -> impl IntoResponse {
-        layout.render(html! {
+        layout.render::<()>(html! {
             <form method="GET" action="/open-console">
                 <div>
                     <label>
@@ -89,7 +99,7 @@ fn open_console() -> Router {
 fn tasks_index() -> Router {
     async fn handler(
         layout: TaskResourceLayout,
-        live: LiveViewManager,
+        embed_live_view: EmbedLiveView<InProcess>,
         ConnectedClient(client): ConnectedClient,
         Extension(pubsub): Extension<InProcess>,
         Path(addr): Path<ConsoleAddr>,
@@ -98,7 +108,7 @@ fn tasks_index() -> Router {
 
         let stream_id = Uuid::new_v4();
 
-        tokio::spawn(process_tasks_index_stream::<tasks_index::Update>(
+        tokio::spawn(process_tasks_index_stream(
             token.child(),
             client,
             pubsub,
@@ -110,8 +120,8 @@ fn tasks_index() -> Router {
         let view = tasks_index::TasksIndex::new(token, stream_id, addr);
 
         Ok(layout.render(html! {
-            { live.embed(connection_state) }
-            { live.embed(view) }
+            { embed_live_view.embed(connection_state).unit() }
+            { embed_live_view.embed(view).unit() }
         }))
     }
 
@@ -121,7 +131,7 @@ fn tasks_index() -> Router {
 fn resources_index() -> Router {
     async fn handler(
         layout: TaskResourceLayout,
-        live: LiveViewManager,
+        embed_live_view: EmbedLiveView<InProcess>,
         ConnectedClient(client): ConnectedClient,
         Extension(pubsub): Extension<InProcess>,
         Path(addr): Path<ConsoleAddr>,
@@ -129,7 +139,7 @@ fn resources_index() -> Router {
         let token = CancelOnDrop::new();
         let stream_id = Uuid::new_v4();
 
-        tokio::spawn(process_tasks_index_stream::<resources_index::Update>(
+        tokio::spawn(process_tasks_index_stream(
             token.child(),
             client,
             pubsub,
@@ -141,8 +151,8 @@ fn resources_index() -> Router {
         let view = resources_index::ResourcesIndex::new(token, stream_id, addr);
 
         layout.render(html! {
-            { live.embed(connection_state) }
-            { live.embed(view) }
+            { embed_live_view.embed(connection_state).unit() }
+            { embed_live_view.embed(view).unit() }
         })
     }
 
@@ -150,14 +160,15 @@ fn resources_index() -> Router {
 }
 
 #[allow(irrefutable_let_patterns)]
-async fn process_tasks_index_stream<T>(
+async fn process_tasks_index_stream<T, M>(
     token: CancelOnDropChildToken,
     mut client: InstrumentClient,
     pubsub: InProcess,
     stream_id: Uuid,
-    message_topic: String,
+    message_topic: T,
 ) where
-    T: TryFrom<console_api::instrument::Update, Error = anyhow::Error>
+    T: Topic<Message = Json<M>>,
+    M: TryFrom<console_api::instrument::Update, Error = anyhow::Error>
         + serde::Serialize
         + serde::de::DeserializeOwned
         + Send
@@ -175,7 +186,7 @@ async fn process_tasks_index_stream<T>(
                 let _ = pubsub
                     .broadcast(
                         &connection_state::msg_topic(stream_id),
-                        Bincode(connection_state::Msg::Error { code, message }),
+                        Json(connection_state::Msg::Error { code, message }),
                     )
                     .await;
                 return;
@@ -184,9 +195,9 @@ async fn process_tasks_index_stream<T>(
 
         while let msg = stream.message().await {
             match msg {
-                Ok(Some(msg)) => match T::try_from(msg) {
+                Ok(Some(msg)) => match M::try_from(msg) {
                     Ok(msg) => {
-                        let _ = pubsub.broadcast(&message_topic, Bincode(msg)).await;
+                        let _ = pubsub.broadcast(&message_topic, Json(msg)).await;
                     }
                     Err(err) => {
                         tracing::error!(%err, "failed to convert gRPC message");
@@ -197,7 +208,7 @@ async fn process_tasks_index_stream<T>(
                     let _ = pubsub
                         .broadcast(
                             &connection_state::msg_topic(stream_id),
-                            Bincode(connection_state::Msg::StreamEnded),
+                            Json(connection_state::Msg::StreamEnded),
                         )
                         .await;
                     break;
@@ -208,7 +219,7 @@ async fn process_tasks_index_stream<T>(
                     let _ = pubsub
                         .broadcast(
                             &connection_state::msg_topic(stream_id),
-                            Bincode(connection_state::Msg::Error { code, message }),
+                            Json(connection_state::Msg::Error { code, message }),
                         )
                         .await;
                     break;
@@ -223,26 +234,6 @@ async fn process_tasks_index_stream<T>(
             tracing::trace!("ending watch_update stream");
         }
     }
-}
-
-fn tasks_show() -> Router {
-    async fn handler(layout: Layout) -> impl IntoResponse {
-        layout.render(html! {
-            "tasks#show"
-        })
-    }
-
-    route("/console/:ip/:port/tasks/:task_id", get(handler))
-}
-
-fn resources_show() -> Router {
-    async fn handler(layout: Layout) -> impl IntoResponse {
-        layout.render(html! {
-            "resources#show"
-        })
-    }
-
-    route("/console/:ip/:port/resources/:resource_id", get(handler))
 }
 
 struct ConnectedClient(InstrumentClient);

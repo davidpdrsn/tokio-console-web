@@ -1,10 +1,12 @@
 use super::{Location, MetaId, Metadata};
 use crate::{cancel_on_drop::CancelOnDrop, routes::ConsoleAddr};
 use anyhow::Context as _;
-use axum::Json;
-use axum_liveview::{html, pubsub::Bincode, Html, LiveView, RenderResult};
+use axum::{async_trait, Json};
+use axum_live_view::{
+    html, js_command as js, live_view::Subscriptions, pubsub::Topic, EventData, Html, LiveView,
+    Updated,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
@@ -21,15 +23,35 @@ pub struct TasksIndex {
     addr: ConsoleAddr,
 }
 
+#[async_trait]
 impl LiveView for TasksIndex {
-    fn setup(&self, setup: &mut axum_liveview::Setup<Self>) {
-        setup.on_broadcast(&msg_topic(self.stream_id), Self::msg);
-        setup.on_broadcast("tick", Self::tick);
-        setup.on("toggle-play-pause", Self::toggle_play_pause);
-        setup.on("row-click", Self::row_click);
+    type Message = Msg;
+
+    fn init(&self, subscriptions: &mut Subscriptions<Self>) {
+        subscriptions.on(&msg_topic(self.stream_id), Self::msg);
+        subscriptions.on(&crate::tick(), Self::tick);
     }
 
-    fn render(&self) -> Html {
+    async fn update(mut self, msg: Self::Message, _data: EventData) -> Updated<Self> {
+        match msg {
+            Msg::TogglePlayPause => {
+                self.paused = !self.paused;
+                Updated::new(self)
+            }
+            Msg::RowClick(task_id) => {
+                let uri = format!(
+                    "/console/{}/{}/tasks/{}",
+                    self.addr.ip, self.addr.port, task_id.0
+                )
+                .parse()
+                .expect("invalid URI");
+
+                Updated::new(self).with(js::navigate_to(uri))
+            }
+        }
+    }
+
+    fn render(&self) -> Html<Self::Message> {
         let mut total = 0;
         let mut running = 0;
         let mut idle = 0;
@@ -65,9 +87,9 @@ impl LiveView for TasksIndex {
                     </div>
                     <div>
                         if self.paused {
-                            <button live-click="toggle-play-pause">"Play"</button>
+                            <button axm-click={ Msg::TogglePlayPause }>"Play"</button>
                         } else {
-                            <button live-click="toggle-play-pause">"Pause"</button>
+                            <button axm-click={ Msg::TogglePlayPause }>"Pause"</button>
                         }
                     </div>
                     <table class="tasks-table">
@@ -97,6 +119,12 @@ impl LiveView for TasksIndex {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub enum Msg {
+    TogglePlayPause,
+    RowClick(TaskId),
+}
+
 impl TasksIndex {
     pub fn new(token: CancelOnDrop, id: Uuid, addr: ConsoleAddr) -> Self {
         Self {
@@ -109,7 +137,7 @@ impl TasksIndex {
         }
     }
 
-    async fn msg(mut self, Bincode(msg): Bincode<Update>) -> RenderResult<Self> {
+    async fn msg(mut self, Json(msg): Json<Update>) -> Updated<Self> {
         let Update {
             new_tasks,
             stats_update,
@@ -134,40 +162,16 @@ impl TasksIndex {
             }
         }
 
-        RenderResult::dont_render(self)
+        Updated::new(self).skip_render(true)
     }
 
-    async fn tick(mut self) -> RenderResult<Self> {
+    async fn tick(mut self, _: ()) -> Updated<Self> {
         if self.paused {
-            RenderResult::dont_render(self)
+            Updated::new(self).skip_render(true)
         } else {
             self.reap();
-            RenderResult::render(self)
+            Updated::new(self)
         }
-    }
-
-    async fn toggle_play_pause(mut self) -> Self {
-        self.paused = !self.paused;
-        self
-    }
-
-    async fn row_click(self, Json(data): axum::Json<Value>) -> RenderResult<Self> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct Data {
-            task_id: String,
-        }
-
-        let data = serde_json::from_value::<Data>(data).unwrap();
-
-        let uri = format!(
-            "/console/{}/{}/tasks/{}",
-            self.addr.ip, self.addr.port, data.task_id
-        )
-        .parse()
-        .expect("invalid URI");
-
-        RenderResult::navigate_to(uri)
     }
 
     fn reap(&mut self) {
@@ -185,8 +189,8 @@ impl TasksIndex {
     }
 }
 
-pub fn msg_topic(id: Uuid) -> String {
-    format!("tasks-index/msg/{}", id)
+pub fn msg_topic(id: Uuid) -> impl Topic<Message = Json<Update>> {
+    axum_live_view::pubsub::topic(format!("tasks-index/msg/{}", id))
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -301,10 +305,10 @@ impl TryFrom<console_api::tasks::Task> for Task {
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct TaskId(u64);
+pub struct TaskId(u64);
 
 impl Task {
-    fn render_as_table_row(&self) -> Html {
+    fn render_as_table_row(&self) -> Html<Msg> {
         let state = match self.state() {
             TaskState::Running => "▶️",
             TaskState::Idle => "⏸",
@@ -312,7 +316,7 @@ impl Task {
         };
 
         html! {
-            <tr live-click="row-click" live-data-task-id={ self.id.0 }>
+            <tr axm-click={ Msg::RowClick(self.id) }>
                 <td>
                     { self.id.0 }
                 </td>

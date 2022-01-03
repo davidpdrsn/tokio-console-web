@@ -1,5 +1,5 @@
 use axum::Router;
-use axum_liveview::{pubsub::InProcess, PubSub};
+use axum_live_view::pubsub::{InProcess, PubSub, Topic};
 use clap::Parser;
 use std::{net::SocketAddr, time::Duration};
 use tower::ServiceBuilder;
@@ -38,17 +38,18 @@ async fn main() -> anyhow::Result<()> {
     tracing::trace!(?config);
 
     let pubsub = InProcess::new();
+    let (live_routes, live_layer) = axum_live_view::router_parts(pubsub.clone());
 
     tokio::spawn(send_ticks(pubsub.clone()));
 
     let app = Router::new()
         .merge(routes::all())
-        .merge(axum_liveview::routes())
+        .merge(live_routes)
         .layer(
             ServiceBuilder::new()
                 .add_extension(Port(config.bind_addr.port()))
-                .add_extension(pubsub.clone())
-                .layer(axum_liveview::layer(pubsub))
+                .add_extension(pubsub)
+                .layer(live_layer)
                 .trace_for_http(),
         );
 
@@ -69,6 +70,10 @@ async fn send_ticks(pubsub: InProcess) {
     let mut interval = tokio::time::interval(Duration::from_secs(1));
     loop {
         interval.tick().await;
-        let _ = pubsub.broadcast("tick", ()).await;
+        let _ = pubsub.broadcast(&tick(), ()).await;
     }
+}
+
+fn tick() -> impl Topic<Message = ()> {
+    axum_live_view::pubsub::topic("tick")
 }

@@ -3,7 +3,7 @@ use axum::{
     async_trait,
     extract::{Extension, FromRequest, Path, RequestParts},
 };
-use axum_liveview::{html, Html};
+use axum_live_view::{html, Html};
 use std::convert::Infallible;
 
 pub struct Layout {
@@ -11,12 +11,12 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn render(self, content: Html) -> Html {
+    pub fn render<T>(self, content: Html<T>) -> Html<T> {
         html! {
             <!DOCTYPE html>
             <html>
                 <head>
-                    { axum_liveview::assets() }
+                    <script src={ format!("/assets/bundle.js?port={}", self.port) }></script>
                     <style>
                         r#"
                             table {
@@ -33,14 +33,14 @@ impl Layout {
                                 background: #eee;
                             }
 
-                            table.tasks-table tr[live-click]
-                            , table.resources-table tr[live-click]
+                            table.tasks-table tr[axm-click]
+                            , table.resources-table tr[axm-click]
                             {
                                 cursor: pointer;
                             }
 
-                            table.tasks-table tr[live-click]:hover
-                            , table.resources-table tr[live-click]:hover
+                            table.tasks-table tr[axm-click]:hover
+                            , table.resources-table tr[axm-click]:hover
                             {
                                 background: #ddd;
                             }
@@ -57,18 +57,6 @@ impl Layout {
                     <div>
                         { content }
                     </div>
-
-                    <script>
-                        {
-                            format!(
-                                r#"
-                                    const liveView = new LiveView('localhost', {})
-                                    liveView.connect()
-                                "#,
-                                self.port,
-                            )
-                        }
-                    </script>
                 </body>
             </html>
         }
@@ -95,7 +83,7 @@ pub struct TaskResourceLayout {
 }
 
 impl TaskResourceLayout {
-    pub fn render(self, content: Html) -> Html {
+    pub fn render<T>(self, content: Html<T>) -> Html<T> {
         self.layout.render(html! {
             <nav>
                 <a href={ format!("/console/{}/{}/tasks", self.addr.ip, self.addr.port) }>"Tasks"</a>

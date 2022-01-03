@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0"
 axum = "0.4"
-axum-liveview = { git = "https://github.com/davidpdrsn/axum-liveview" }
+axum-live-view = { git = "https://github.com/davidpdrsn/axum-live-view" }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "3.0.0-rc.7", features = ["derive", "env"] }
 console-api = { version = "0.1.0", features = ["transport"] }
