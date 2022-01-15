@@ -2,27 +2,23 @@ use crate::cancel_on_drop::CancelOnDropChildToken;
 use crate::views::{connection_state, resources_index, tasks_index, TaskResourceLayout};
 use crate::InstrumentClient;
 use crate::{cancel_on_drop::CancelOnDrop, views::Layout};
-use axum::response::Headers;
 use axum::routing::MethodRouter;
-use axum::Json;
 use axum::{
     async_trait,
-    extract::{Extension, FromRequest, Path, Query, RequestParts},
+    extract::{FromRequest, Path, Query, RequestParts},
     http::StatusCode,
     response::{IntoResponse, Redirect, Response},
     routing::get,
     Router,
 };
-use axum_live_view::pubsub::{InProcess, PubSub, Topic};
-use axum_live_view::{html, EmbedLiveView};
+use axum_live_view::{html, LiveViewUpgrade};
 use serde::Deserialize;
 use std::net::SocketAddr;
+use tokio::sync::mpsc;
 use tonic::transport::Endpoint;
-use uuid::Uuid;
 
 pub fn all() -> Router {
     Router::new()
-        .merge(assets())
         .merge(root())
         .merge(open_console())
         .merge(tasks_index())
@@ -31,19 +27,6 @@ pub fn all() -> Router {
 
 fn route(path: &str, method_router: MethodRouter) -> Router {
     Router::new().route(path, method_router)
-}
-
-fn assets() -> Router {
-    async fn bundle_js() -> impl IntoResponse {
-        const JS: &str = include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/assets/dist/bundle.js"
-        ));
-        let headers = Headers([(axum::http::header::CONTENT_TYPE, "application/javascript")]);
-        (headers, JS)
-    }
-
-    Router::new().nest("/assets", Router::new().route("/bundle.js", get(bundle_js)))
 }
 
 fn root() -> Router {
@@ -99,30 +82,41 @@ fn open_console() -> Router {
 fn tasks_index() -> Router {
     async fn handler(
         layout: TaskResourceLayout,
-        embed_live_view: EmbedLiveView<InProcess>,
+        live: LiveViewUpgrade,
         ConnectedClient(client): ConnectedClient,
-        Extension(pubsub): Extension<InProcess>,
         Path(addr): Path<ConsoleAddr>,
-    ) -> Result<impl IntoResponse, (StatusCode, &'static str)> {
-        let token = CancelOnDrop::new();
+    ) -> impl IntoResponse {
+        live.response(|embed| {
+            let token = CancelOnDrop::new();
 
-        let stream_id = Uuid::new_v4();
+            let (connection_state_tx, connection_state_rx) = mpsc::channel(1024);
+            let (msg_tx, msg_rx) = mpsc::channel(1024);
 
-        tokio::spawn(process_tasks_index_stream(
-            token.child(),
-            client,
-            pubsub,
-            stream_id,
-            tasks_index::msg_topic(stream_id),
-        ));
+            if embed.connected() {
+                tokio::spawn(process_tasks_index_stream(
+                    token.child(),
+                    client,
+                    connection_state_tx,
+                    msg_tx,
+                ));
+            }
 
-        let connection_state = connection_state::ConnectionState::new(stream_id, addr.clone());
-        let view = tasks_index::TasksIndex::new(token, stream_id, addr);
+            let connection_state =
+                connection_state::ConnectionState::new(addr.clone(), connection_state_rx);
 
-        Ok(layout.render(html! {
-            { embed_live_view.embed(connection_state).unit() }
-            { embed_live_view.embed(view).unit() }
-        }))
+            let view = tasks_index::TasksIndex::new(addr, token, msg_rx);
+
+            let views = axum_live_view::live_view::combine(
+                (connection_state, view),
+                |connection_state, view| {
+                    html! {
+                        { connection_state }
+                        { view }
+                    }
+                },
+            );
+            layout.render(embed.embed(views))
+        })
     }
 
     route("/console/:ip/:port/tasks", get(handler))
@@ -131,28 +125,40 @@ fn tasks_index() -> Router {
 fn resources_index() -> Router {
     async fn handler(
         layout: TaskResourceLayout,
-        embed_live_view: EmbedLiveView<InProcess>,
+        live: LiveViewUpgrade,
         ConnectedClient(client): ConnectedClient,
-        Extension(pubsub): Extension<InProcess>,
         Path(addr): Path<ConsoleAddr>,
     ) -> impl IntoResponse {
-        let token = CancelOnDrop::new();
-        let stream_id = Uuid::new_v4();
+        live.response(|embed| {
+            let token = CancelOnDrop::new();
 
-        tokio::spawn(process_tasks_index_stream(
-            token.child(),
-            client,
-            pubsub,
-            stream_id,
-            resources_index::msg_topic(stream_id),
-        ));
+            let (connection_state_tx, connection_state_rx) = mpsc::channel(1024);
+            let (msg_tx, msg_rx) = mpsc::channel(1024);
 
-        let connection_state = connection_state::ConnectionState::new(stream_id, addr.clone());
-        let view = resources_index::ResourcesIndex::new(token, stream_id, addr);
+            if embed.connected() {
+                tokio::spawn(process_tasks_index_stream(
+                    token.child(),
+                    client,
+                    connection_state_tx,
+                    msg_tx,
+                ));
+            }
 
-        layout.render(html! {
-            { embed_live_view.embed(connection_state).unit() }
-            { embed_live_view.embed(view).unit() }
+            let connection_state =
+                connection_state::ConnectionState::new(addr.clone(), connection_state_rx);
+
+            let view = resources_index::ResourcesIndex::new(addr, token, msg_rx);
+
+            let views = axum_live_view::live_view::combine(
+                (connection_state, view),
+                |connection_state, view| {
+                    html! {
+                        { connection_state }
+                        { view }
+                    }
+                },
+            );
+            layout.render(embed.embed(views))
         })
     }
 
@@ -160,44 +166,38 @@ fn resources_index() -> Router {
 }
 
 #[allow(irrefutable_let_patterns)]
-async fn process_tasks_index_stream<T, M>(
+async fn process_tasks_index_stream<M>(
     token: CancelOnDropChildToken,
     mut client: InstrumentClient,
-    pubsub: InProcess,
-    stream_id: Uuid,
-    message_topic: T,
+    connection_state_tx: mpsc::Sender<connection_state::Msg>,
+    msg_tx: mpsc::Sender<M>,
 ) where
-    T: Topic<Message = Json<M>>,
-    M: TryFrom<console_api::instrument::Update, Error = anyhow::Error>
-        + serde::Serialize
-        + serde::de::DeserializeOwned
-        + Send
-        + Sync
-        + 'static,
+    M: TryFrom<console_api::instrument::Update, Error = anyhow::Error> + Send + Sync + 'static,
 {
     use console_api::instrument::InstrumentRequest;
 
-    let process_stream = async move {
+    let process_stream = async {
         let mut stream = match client.watch_updates(InstrumentRequest {}).await {
             Ok(res) => res.into_inner(),
             Err(err) => {
                 let code: i32 = err.code().into();
                 let message = err.message().to_owned();
-                let _ = pubsub
-                    .broadcast(
-                        &connection_state::msg_topic(stream_id),
-                        Json(connection_state::Msg::Error { code, message }),
-                    )
+                let _ = connection_state_tx
+                    .send(connection_state::Msg::Error { code, message })
                     .await;
                 return;
             }
         };
 
+        let _ = connection_state_tx
+            .send(connection_state::Msg::Connected)
+            .await;
+
         while let msg = stream.message().await {
             match msg {
                 Ok(Some(msg)) => match M::try_from(msg) {
                     Ok(msg) => {
-                        let _ = pubsub.broadcast(&message_topic, Json(msg)).await;
+                        let _ = msg_tx.send(msg).await;
                     }
                     Err(err) => {
                         tracing::error!(%err, "failed to convert gRPC message");
@@ -205,22 +205,16 @@ async fn process_tasks_index_stream<T, M>(
                     }
                 },
                 Ok(None) => {
-                    let _ = pubsub
-                        .broadcast(
-                            &connection_state::msg_topic(stream_id),
-                            Json(connection_state::Msg::StreamEnded),
-                        )
+                    let _ = connection_state_tx
+                        .send(connection_state::Msg::StreamEnded)
                         .await;
                     break;
                 }
                 Err(err) => {
                     let code: i32 = err.code().into();
                     let message = err.message().to_owned();
-                    let _ = pubsub
-                        .broadcast(
-                            &connection_state::msg_topic(stream_id),
-                            Json(connection_state::Msg::Error { code, message }),
-                        )
+                    let _ = connection_state_tx
+                        .send(connection_state::Msg::Error { code, message })
                         .await;
                     break;
                 }

@@ -1,5 +1,4 @@
 use axum::Router;
-use axum_live_view::pubsub::{InProcess, PubSub, Topic};
 use clap::Parser;
 use std::{net::SocketAddr, time::Duration};
 use tower::ServiceBuilder;
@@ -37,19 +36,12 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     tracing::trace!(?config);
 
-    let pubsub = InProcess::new();
-    let (live_routes, live_layer) = axum_live_view::router_parts(pubsub.clone());
-
-    tokio::spawn(send_ticks(pubsub.clone()));
-
     let app = Router::new()
         .merge(routes::all())
-        .merge(live_routes)
+        .merge(axum_live_view::precompiled_js_route("/assets/live-view.js"))
         .layer(
             ServiceBuilder::new()
                 .add_extension(Port(config.bind_addr.port()))
-                .add_extension(pubsub)
-                .layer(live_layer)
                 .trace_for_http(),
         );
 
@@ -65,15 +57,3 @@ struct Port(u16);
 
 type InstrumentClient =
     console_api::instrument::instrument_client::InstrumentClient<tonic::transport::Channel>;
-
-async fn send_ticks(pubsub: InProcess) {
-    let mut interval = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        interval.tick().await;
-        let _ = pubsub.broadcast(&tick(), ()).await;
-    }
-}
-
-fn tick() -> impl Topic<Message = ()> {
-    axum_live_view::pubsub::topic("tick")
-}

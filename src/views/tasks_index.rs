@@ -1,42 +1,75 @@
 use super::{Location, MetaId, Metadata};
 use crate::{cancel_on_drop::CancelOnDrop, routes::ConsoleAddr};
 use anyhow::Context as _;
-use axum::{async_trait, Json};
+use axum::{
+    async_trait,
+    http::{HeaderMap, Uri},
+};
 use axum_live_view::{
-    html, js_command as js, live_view::Subscriptions, pubsub::Topic, EventData, Html, LiveView,
-    Updated,
+    event_data::EventData,
+    html, js_command,
+    live_view::{Updated, ViewHandle},
+    Html, LiveView,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
+    convert::Infallible,
     fmt,
     time::{Duration, SystemTime},
 };
-use uuid::Uuid;
+use tokio::sync::mpsc;
 
 pub struct TasksIndex {
+    state: State,
+    paused_state: Option<State>,
+    addr: ConsoleAddr,
+    rx: Option<mpsc::Receiver<Update>>,
     _token: CancelOnDrop,
-    stream_id: Uuid,
+}
+
+#[derive(Clone)]
+struct State {
     tasks: BTreeMap<TaskId, Task>,
     metadata: HashMap<MetaId, Metadata>,
-    paused: bool,
-    addr: ConsoleAddr,
 }
 
 #[async_trait]
 impl LiveView for TasksIndex {
     type Message = Msg;
+    type Error = Infallible;
 
-    fn init(&self, subscriptions: &mut Subscriptions<Self>) {
-        subscriptions.on(&msg_topic(self.stream_id), Self::msg);
-        subscriptions.on(&crate::tick(), Self::tick);
+    async fn mount(
+        &mut self,
+        _uri: Uri,
+        _request_headers: &HeaderMap,
+        handle: ViewHandle<Self::Message>,
+    ) -> Result<(), Self::Error> {
+        if let Some(mut rx) = self.rx.take() {
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if handle.send(Msg::Update(msg)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(())
     }
 
-    async fn update(mut self, msg: Self::Message, _data: EventData) -> Updated<Self> {
+    async fn update(
+        mut self,
+        msg: Self::Message,
+        _data: Option<EventData>,
+    ) -> Result<Updated<Self>, Self::Error> {
         match msg {
             Msg::TogglePlayPause => {
-                self.paused = !self.paused;
-                Updated::new(self)
+                if self.paused_state.is_some() {
+                    self.paused_state = None;
+                } else {
+                    self.paused_state = Some(self.state.clone());
+                }
+                Ok(Updated::new(self))
             }
             Msg::RowClick(task_id) => {
                 let uri = format!(
@@ -46,17 +79,63 @@ impl LiveView for TasksIndex {
                 .parse()
                 .expect("invalid URI");
 
-                Updated::new(self).with(js::navigate_to(uri))
+                Ok(Updated::new(self).with(js_command::navigate_to(uri)))
+            }
+            Msg::Update(update) => {
+                let Update {
+                    new_tasks,
+                    stats_update,
+                    new_metadata,
+                } = update;
+
+                for task in new_tasks {
+                    self.state.tasks.insert(task.id, task);
+                }
+
+                for (id, stats) in stats_update {
+                    if let Some(task) = self.state.tasks.get_mut(&id) {
+                        task.stats = Some(stats);
+                    }
+                }
+
+                self.state.metadata.extend(new_metadata);
+
+                for task in self.state.tasks.values_mut() {
+                    if let Some(metadata) = self.state.metadata.get(&task.metadata_id) {
+                        task.target = Some(metadata.target.clone());
+                    }
+                }
+
+                self.state.tasks.retain(|_id, task| {
+                    if let Some(stats) = &task.stats {
+                        if let Some(dropped_at) = stats.dropped_at {
+                            dropped_at.elapsed().unwrap() < Duration::from_secs(5)
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                });
+
+                Ok(Updated::new(self))
             }
         }
     }
 
     fn render(&self) -> Html<Self::Message> {
+        let state = if let Some(state) = &self.paused_state {
+            state
+        } else {
+            &self.state
+        };
+
         let mut total = 0;
         let mut running = 0;
         let mut idle = 0;
         let mut completed = 0;
-        for task in self.tasks.values() {
+
+        for task in state.tasks.values() {
             total += 1;
             match task.state() {
                 TaskState::Running => running += 1,
@@ -67,7 +146,7 @@ impl LiveView for TasksIndex {
 
         html! {
             <div>
-                if self.tasks.is_empty() {
+                if state.tasks.is_empty() {
                     "Loading..."
                 } else {
                     <div>
@@ -86,7 +165,7 @@ impl LiveView for TasksIndex {
                         }
                     </div>
                     <div>
-                        if self.paused {
+                        if self.paused_state.is_some() {
                             <button axm-click={ Msg::TogglePlayPause }>"Play"</button>
                         } else {
                             <button axm-click={ Msg::TogglePlayPause }>"Pause"</button>
@@ -108,7 +187,7 @@ impl LiveView for TasksIndex {
                             </tr>
                         </thead>
                         <tbody>
-                            for task in self.tasks.values() {
+                            for task in state.tasks.values() {
                                 { task.render_as_table_row() }
                             }
                         </tbody>
@@ -123,77 +202,25 @@ impl LiveView for TasksIndex {
 pub enum Msg {
     TogglePlayPause,
     RowClick(TaskId),
+    Update(Update),
 }
 
 impl TasksIndex {
-    pub fn new(token: CancelOnDrop, id: Uuid, addr: ConsoleAddr) -> Self {
+    pub fn new(addr: ConsoleAddr, token: CancelOnDrop, rx: mpsc::Receiver<Update>) -> Self {
         Self {
-            _token: token,
-            stream_id: id,
-            tasks: Default::default(),
-            metadata: Default::default(),
-            paused: false,
+            state: State {
+                tasks: Default::default(),
+                metadata: Default::default(),
+            },
+            paused_state: None,
             addr,
+            _token: token,
+            rx: Some(rx),
         }
-    }
-
-    async fn msg(mut self, Json(msg): Json<Update>) -> Updated<Self> {
-        let Update {
-            new_tasks,
-            stats_update,
-            new_metadata,
-        } = msg;
-
-        for task in new_tasks {
-            self.tasks.insert(task.id, task);
-        }
-
-        for (id, stats) in stats_update {
-            if let Some(task) = self.tasks.get_mut(&id) {
-                task.stats = Some(stats);
-            }
-        }
-
-        self.metadata.extend(new_metadata);
-
-        for task in self.tasks.values_mut() {
-            if let Some(metadata) = self.metadata.get(&task.metadata_id) {
-                task.target = Some(metadata.target.clone());
-            }
-        }
-
-        Updated::new(self).skip_render(true)
-    }
-
-    async fn tick(mut self, _: ()) -> Updated<Self> {
-        if self.paused {
-            Updated::new(self).skip_render(true)
-        } else {
-            self.reap();
-            Updated::new(self)
-        }
-    }
-
-    fn reap(&mut self) {
-        self.tasks.retain(|_id, task| {
-            if let Some(stats) = &task.stats {
-                if let Some(dropped_at) = stats.dropped_at {
-                    dropped_at.elapsed().unwrap() < Duration::from_secs(5)
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        })
     }
 }
 
-pub fn msg_topic(id: Uuid) -> impl Topic<Message = Json<Update>> {
-    axum_live_view::pubsub::topic(format!("tasks-index/msg/{}", id))
-}
-
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 pub struct Update {
     new_tasks: Vec<Task>,
     stats_update: BTreeMap<TaskId, Stats>,
@@ -241,7 +268,7 @@ impl TryFrom<console_api::instrument::Update> for Update {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 struct Task {
     id: TaskId,
     fields: BTreeMap<String, FieldValue>,
@@ -418,7 +445,7 @@ enum TaskState {
     Completed,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 enum FieldValue {
     Debug(String),
     Str(String),
@@ -451,7 +478,7 @@ impl From<console_api::field::Value> for FieldValue {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 struct Stats {
     dropped_at: Option<SystemTime>,
     created_at: Option<SystemTime>,

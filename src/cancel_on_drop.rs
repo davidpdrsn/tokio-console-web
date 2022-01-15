@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub struct CancelOnDrop {
     inner: tokio_util::sync::CancellationToken,
 }

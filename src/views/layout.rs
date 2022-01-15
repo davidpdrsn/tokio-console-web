@@ -16,7 +16,6 @@ impl Layout {
             <!DOCTYPE html>
             <html>
                 <head>
-                    <script src={ format!("/assets/bundle.js?port={}", self.port) }></script>
                     <style>
                         r#"
                             table {
@@ -57,6 +56,8 @@ impl Layout {
                     <div>
                         { content }
                     </div>
+
+                    <script src="/assets/live-view.js"></script>
                 </body>
             </html>
         }

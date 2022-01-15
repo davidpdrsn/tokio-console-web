@@ -1,37 +1,75 @@
 use super::{Location, MetaId, Metadata};
 use crate::{cancel_on_drop::CancelOnDrop, routes::ConsoleAddr};
 use anyhow::Context;
-use axum::{async_trait, Json};
+use axum::{
+    async_trait,
+    http::{HeaderMap, Uri},
+};
 use axum_live_view::{
-    html, js_command as js, live_view::Subscriptions, EventData, Html, LiveView, Updated, pubsub::Topic,
+    event_data::EventData,
+    html, js_command,
+    live_view::{Updated, ViewHandle},
+    Html, LiveView,
 };
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
+    convert::Infallible,
     time::{Duration, SystemTime},
 };
-use uuid::Uuid;
+use tokio::sync::mpsc;
 
 pub struct ResourcesIndex {
+    state: State,
+    paused_state: Option<State>,
+    addr: ConsoleAddr,
+    rx: Option<mpsc::Receiver<Update>>,
     _token: CancelOnDrop,
-    stream_id: Uuid,
-    paused: bool,
+}
+
+#[derive(Clone)]
+struct State {
     resources: BTreeMap<ResourceId, Resource>,
     metadata: HashMap<MetaId, Metadata>,
-    addr: ConsoleAddr,
 }
 
 #[async_trait]
 impl LiveView for ResourcesIndex {
     type Message = Msg;
+    type Error = Infallible;
 
-    fn init(&self, subscriptions: &mut Subscriptions<Self>) {
-        subscriptions.on(&msg_topic(self.stream_id), Self::msg);
-        subscriptions.on(&crate::tick(), Self::tick);
+    async fn mount(
+        &mut self,
+        _uri: Uri,
+        _request_headers: &HeaderMap,
+        handle: ViewHandle<Self::Message>,
+    ) -> Result<(), Self::Error> {
+        if let Some(mut rx) = self.rx.take() {
+            tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if handle.send(Msg::Update(msg)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        Ok(())
     }
 
-    async fn update(mut self, msg: Self::Message, _data: EventData) -> Updated<Self> {
+    async fn update(
+        mut self,
+        msg: Self::Message,
+        _data: Option<EventData>,
+    ) -> Result<Updated<Self>, Self::Error> {
         match msg {
+            Msg::TogglePlayPause => {
+                if self.paused_state.is_some() {
+                    self.paused_state = None;
+                } else {
+                    self.paused_state = Some(self.state.clone());
+                }
+                Ok(Updated::new(self))
+            }
             Msg::RowClick(resource_id) => {
                 let uri = format!(
                     "/console/{}/{}/resources/{}",
@@ -40,23 +78,64 @@ impl LiveView for ResourcesIndex {
                 .parse()
                 .expect("invalid URI");
 
-                Updated::new(self).with(js::navigate_to(uri))
+                Ok(Updated::new(self).with(js_command::navigate_to(uri)))
             }
-            Msg::TogglePlayPause => {
-                self.paused = !self.paused;
-                Updated::new(self)
+            Msg::Update(update) => {
+                let Update {
+                    new_resources,
+                    new_metadata,
+                    stats_update,
+                } = update;
+
+                for resources in new_resources {
+                    self.state.resources.insert(resources.id, resources);
+                }
+
+                self.state.metadata.extend(new_metadata);
+
+                for (id, stats) in stats_update {
+                    if let Some(resource) = self.state.resources.get_mut(&id) {
+                        resource.stats = Some(stats);
+                    }
+                }
+
+                for resource in self.state.resources.values_mut() {
+                    if let Some(metadata) = self.state.metadata.get(&resource.metadata_id) {
+                        resource.target = Some(metadata.target.clone());
+                    }
+                }
+
+                self.state.resources.retain(|_id, resource| {
+                    if let Some(stats) = &resource.stats {
+                        if let Some(dropped_at) = stats.dropped_at {
+                            dropped_at.elapsed().unwrap() < Duration::from_secs(5)
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    }
+                });
+
+                Ok(Updated::new(self))
             }
         }
     }
 
     fn render(&self) -> Html<Self::Message> {
+        let state = if let Some(state) = &self.paused_state {
+            state
+        } else {
+            &self.state
+        };
+
         html! {
             <div>
-                if self.resources.is_empty() {
+                if state.resources.is_empty() {
                     "Loading..."
                 } else {
                     <div>
-                        if self.paused {
+                        if self.paused_state.is_some() {
                             <button axm-click={ Msg::TogglePlayPause }>"Play"</button>
                         } else {
                             <button axm-click={ Msg::TogglePlayPause }>"Pause"</button>
@@ -76,7 +155,7 @@ impl LiveView for ResourcesIndex {
                             </tr>
                         </thead>
                         <tbody>
-                            for resource in self.resources.values() {
+                            for resource in state.resources.values() {
                                 { resource.render_as_table_row() }
                             }
                         </tbody>
@@ -91,77 +170,25 @@ impl LiveView for ResourcesIndex {
 pub enum Msg {
     RowClick(ResourceId),
     TogglePlayPause,
+    Update(Update),
 }
 
 impl ResourcesIndex {
-    pub fn new(token: CancelOnDrop, id: Uuid, addr: ConsoleAddr) -> Self {
+    pub fn new(addr: ConsoleAddr, token: CancelOnDrop, rx: mpsc::Receiver<Update>) -> Self {
         Self {
-            _token: token,
-            stream_id: id,
-            paused: false,
-            resources: Default::default(),
-            metadata: Default::default(),
+            paused_state: None,
+            state: State {
+                resources: Default::default(),
+                metadata: Default::default(),
+            },
             addr,
+            rx: Some(rx),
+            _token: token,
         }
-    }
-
-    async fn msg(mut self, Json(msg): Json<Update>) -> Updated<Self> {
-        let Update {
-            new_resources,
-            new_metadata,
-            stats_update,
-        } = msg;
-
-        for resources in new_resources {
-            self.resources.insert(resources.id, resources);
-        }
-
-        self.metadata.extend(new_metadata);
-
-        for (id, stats) in stats_update {
-            if let Some(resource) = self.resources.get_mut(&id) {
-                resource.stats = Some(stats);
-            }
-        }
-
-        for resource in self.resources.values_mut() {
-            if let Some(metadata) = self.metadata.get(&resource.metadata_id) {
-                resource.target = Some(metadata.target.clone());
-            }
-        }
-
-        Updated::new(self).skip_render(true)
-    }
-
-    async fn tick(mut self, _: ()) -> Updated<Self> {
-        if self.paused {
-            Updated::new(self).skip_render(true)
-        } else {
-            self.reap();
-            Updated::new(self)
-        }
-    }
-
-    fn reap(&mut self) {
-        self.resources.retain(|_id, resource| {
-            if let Some(stats) = &resource.stats {
-                if let Some(dropped_at) = stats.dropped_at {
-                    dropped_at.elapsed().unwrap() < Duration::from_secs(5)
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        })
     }
 }
 
-pub fn msg_topic(id: Uuid) -> impl Topic<Message = Json<Update>> {
-    axum_live_view::pubsub::topic(format!("resources-index/msg/{}", id))
-}
-
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
 pub struct Update {
     new_resources: Vec<Resource>,
     new_metadata: HashMap<MetaId, Metadata>,
@@ -211,7 +238,7 @@ impl TryFrom<console_api::instrument::Update> for Update {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Clone, Deserialize, Serialize, Debug, PartialEq)]
 struct Resource {
     id: ResourceId,
     vis: TypeVisibility,
@@ -319,13 +346,13 @@ impl Resource {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone, Copy)]
 enum TypeVisibility {
     Public,
     Internal,
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 struct Stats {
     dropped_at: Option<SystemTime>,
     created_at: Option<SystemTime>,

@@ -10,7 +10,7 @@ mod layout;
 
 pub use self::layout::{Layout, TaskResourceLayout};
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq)]
 struct Location {
     file: String,
     module_path: Option<String>,
@@ -62,7 +62,7 @@ fn truncate_registry_path(s: String) -> String {
 #[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct MetaId(u64);
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
 struct Metadata {
     id: MetaId,
     name: String,
