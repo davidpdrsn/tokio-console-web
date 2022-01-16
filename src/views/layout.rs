@@ -1,13 +1,15 @@
-use crate::{routes::ConsoleAddr, Port};
+use crate::routes::ConsoleAddr;
 use axum::{
     async_trait,
-    extract::{Extension, FromRequest, Path, RequestParts},
+    extract::{FromRequest, Path, RequestParts},
+    response::{IntoResponse, Response},
 };
+use axum_flash::IncomingFlashes;
 use axum_live_view::{html, Html};
 use std::convert::Infallible;
 
 pub struct Layout {
-    port: u16,
+    flash: IncomingFlashes,
 }
 
 impl Layout {
@@ -47,6 +49,12 @@ impl Layout {
                     </style>
                 </head>
                 <body>
+                    if !self.flash.is_empty() {
+                        for (_, msg) in self.flash {
+                            <div>{ msg }</div>
+                        }
+                    }
+
                     <nav>
                         <a href="/">"Home"</a>
                     </nav>
@@ -69,12 +77,14 @@ impl<B> FromRequest<B> for Layout
 where
     B: Send,
 {
-    type Rejection = Infallible;
+    type Rejection = Response;
 
     async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let Extension(Port(port)) = FromRequest::from_request(req).await.unwrap();
+        let flash = IncomingFlashes::from_request(req)
+            .await
+            .map_err(IntoResponse::into_response)?;
 
-        Ok(Self { port })
+        Ok(Self { flash })
     }
 }
 

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{routes::ConsoleAddr, InstrumentClient};
 use anyhow::Context as _;
 use console_api::instrument::InstrumentRequest;
@@ -10,7 +8,11 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime},
 };
-use tokio::sync::{watch, Mutex};
+use tokio::{
+    sync::{watch, Mutex},
+    time::Instant,
+};
+use tokio_stream::{wrappers::IntervalStream, StreamExt};
 use tonic::{transport::Endpoint, Streaming};
 
 #[derive(Clone, Default)]
@@ -62,118 +64,143 @@ impl ConsoleSubscriptions {
 }
 
 async fn subscribe_to_console_updates(
-    mut stream: Streaming<console_api::instrument::Update>,
+    update_stream: Streaming<console_api::instrument::Update>,
     tx: watch::Sender<ConsoleState>,
 ) -> anyhow::Result<()> {
     let mut state = ConsoleState::default();
 
-    while let Ok(Some(msg)) = stream.message().await {
-        #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
-        pub struct Update {
-            new_tasks: Vec<Task>,
-            stats_update: BTreeMap<TaskId, TaskStats>,
-            new_metadata: HashMap<MetaId, Metadata>,
+    #[allow(clippy::large_enum_variant)]
+    enum Msg {
+        Update(console_api::instrument::Update),
+        CheckReceivers,
+    }
+
+    let freq = Duration::from_secs(10);
+    let check_receivers_interval =
+        IntervalStream::new(tokio::time::interval_at(Instant::now() + freq, freq))
+            .map(|_| Msg::CheckReceivers);
+
+    let update_stream = update_stream.filter_map(Result::ok).map(Msg::Update);
+
+    let mut stream = update_stream.merge(check_receivers_interval);
+
+    while let Some(msg) = stream.next().await {
+        match msg {
+            Msg::CheckReceivers => {
+                if tx.receiver_count() == 1 {
+                    // there will always be one receiver in the map
+                    // so if there is only 1, then all others are gone
+                    tracing::debug!("no more receivers on stream, closing");
+                    break;
+                }
+            }
+            Msg::Update(msg) => {
+                #[derive(Deserialize, Serialize, Debug, PartialEq, Clone)]
+                pub struct Update {
+                    new_tasks: Vec<Task>,
+                    stats_update: BTreeMap<TaskId, TaskStats>,
+                    new_metadata: HashMap<MetaId, Metadata>,
+                }
+
+                let console_api::instrument::Update {
+                    task_update,
+                    new_metadata,
+                    resource_update,
+                    ..
+                } = msg;
+
+                // update metadata
+                for new_metadata in new_metadata.unwrap_or_default().metadata {
+                    let metadata = Metadata::try_from(new_metadata)?;
+                    state.metadata.insert(metadata.id, metadata);
+                }
+
+                // update tasks
+                {
+                    let console_api::tasks::TaskUpdate {
+                        new_tasks,
+                        stats_update,
+                        dropped_events: _,
+                    } = task_update.context("Missing `task_update` field")?;
+
+                    for new_task in new_tasks {
+                        let task = Task::try_from(new_task)?;
+                        state.tasks.insert(task.id, task);
+                    }
+
+                    for (id, stats) in stats_update {
+                        let id = TaskId(id);
+                        let stats = TaskStats::try_from(stats)?;
+                        if let Some(task) = state.tasks.get_mut(&id) {
+                            task.stats = Some(stats);
+                        }
+                    }
+
+                    for task in state.tasks.values_mut() {
+                        if let Some(metadata) = state.metadata.get(&task.metadata_id) {
+                            task.target = Some(metadata.target.clone());
+                        }
+                    }
+
+                    state.tasks.retain(|_id, task| {
+                        if let Some(stats) = &task.stats {
+                            if let Some(dropped_at) = stats.dropped_at {
+                                dropped_at.elapsed().unwrap() < Duration::from_secs(5)
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        }
+                    });
+                }
+
+                // update resources
+                {
+                    let console_api::resources::ResourceUpdate {
+                        new_resources,
+                        stats_update,
+                        new_poll_ops: _,
+                        dropped_events: _,
+                    } = resource_update.context("Missing `resource_update` field")?;
+
+                    for new_resource in new_resources {
+                        let resource = Resource::try_from(new_resource)?;
+                        state.resources.insert(resource.id, resource);
+                    }
+
+                    for (id, stats) in stats_update {
+                        let id = ResourceId(id);
+                        let stats = ResourceStats::try_from(stats)?;
+                        if let Some(task) = state.resources.get_mut(&id) {
+                            task.stats = Some(stats);
+                        }
+                    }
+
+                    for resource in state.resources.values_mut() {
+                        if let Some(metadata) = state.metadata.get(&resource.metadata_id) {
+                            resource.target = Some(metadata.target.clone());
+                        }
+                    }
+
+                    state.resources.retain(|_id, resource| {
+                        if let Some(stats) = &resource.stats {
+                            if let Some(dropped_at) = stats.dropped_at {
+                                dropped_at.elapsed().unwrap() < Duration::from_secs(5)
+                            } else {
+                                true
+                            }
+                        } else {
+                            true
+                        }
+                    });
+                }
+
+                // notify subscribers
+                tx.send(state.clone())
+                    .map_err(|_| anyhow::Error::msg("failed to send new state"))?;
+            }
         }
-
-        let console_api::instrument::Update {
-            task_update,
-            new_metadata,
-            resource_update,
-            ..
-        } = msg;
-
-        // update metadata
-        for new_metadata in new_metadata.unwrap_or_default().metadata {
-            let metadata = Metadata::try_from(new_metadata)?;
-            state.metadata.insert(metadata.id, metadata);
-        }
-
-        // update tasks
-        {
-            let console_api::tasks::TaskUpdate {
-                new_tasks,
-                stats_update,
-                dropped_events: _,
-            } = task_update.context("Missing `task_update` field")?;
-
-            for new_task in new_tasks {
-                let task = Task::try_from(new_task)?;
-                state.tasks.insert(task.id, task);
-            }
-
-            for (id, stats) in stats_update {
-                let id = TaskId(id);
-                let stats = TaskStats::try_from(stats)?;
-                if let Some(task) = state.tasks.get_mut(&id) {
-                    task.stats = Some(stats);
-                }
-            }
-
-            for task in state.tasks.values_mut() {
-                if let Some(metadata) = state.metadata.get(&task.metadata_id) {
-                    task.target = Some(metadata.target.clone());
-                }
-            }
-        }
-
-        // update resources
-        {
-            let console_api::resources::ResourceUpdate {
-                new_resources,
-                stats_update,
-                new_poll_ops: _,
-                dropped_events: _,
-            } = resource_update.context("Missing `resource_update` field")?;
-
-            for new_resource in new_resources {
-                let resource = Resource::try_from(new_resource)?;
-                state.resources.insert(resource.id, resource);
-            }
-
-            for (id, stats) in stats_update {
-                let id = ResourceId(id);
-                let stats = ResourceStats::try_from(stats)?;
-                if let Some(task) = state.resources.get_mut(&id) {
-                    task.stats = Some(stats);
-                }
-            }
-
-            for resource in state.resources.values_mut() {
-                if let Some(metadata) = state.metadata.get(&resource.metadata_id) {
-                    resource.target = Some(metadata.target.clone());
-                }
-            }
-        }
-
-        // reap tasks
-        state.tasks.retain(|_id, task| {
-            if let Some(stats) = &task.stats {
-                if let Some(dropped_at) = stats.dropped_at {
-                    dropped_at.elapsed().unwrap() < Duration::from_secs(5)
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        });
-
-        // reap resources
-        state.resources.retain(|_id, resource| {
-            if let Some(stats) = &resource.stats {
-                if let Some(dropped_at) = stats.dropped_at {
-                    dropped_at.elapsed().unwrap() < Duration::from_secs(5)
-                } else {
-                    true
-                }
-            } else {
-                true
-            }
-        });
-
-        // notify subscribers
-        tx.send(state.clone())
-            .map_err(|_| anyhow::Error::msg("failed to send new state"))?;
     }
 
     Ok(())
