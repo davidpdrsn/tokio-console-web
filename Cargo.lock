@@ -125,7 +125,7 @@ dependencies = [
 [[package]]
 name = "axum-live-view"
 version = "0.1.0"
-source = "git+https://github.com/davidpdrsn/axum-live-view?rev=012cd006261a0#012cd006261a0fd841d579068cf6629095a60b5d"
+source = "git+https://github.com/davidpdrsn/axum-live-view?rev=3a9c37231d9f2#3a9c37231d9f2960d3acae86b37c2dee26b198ff"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -151,7 +151,7 @@ dependencies = [
 [[package]]
 name = "axum-live-view-macros"
 version = "0.1.0"
-source = "git+https://github.com/davidpdrsn/axum-live-view?rev=012cd006261a0#012cd006261a0fd841d579068cf6629095a60b5d"
+source = "git+https://github.com/davidpdrsn/axum-live-view?rev=3a9c37231d9f2#3a9c37231d9f2960d3acae86b37c2dee26b198ff"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1195,6 +1195,7 @@ dependencies = [
  "clap",
  "console-api",
  "once_cell",
+ "parking_lot",
  "regex",
  "serde",
  "serde_json",

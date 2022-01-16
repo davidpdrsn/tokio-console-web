@@ -1,12 +1,14 @@
 use axum::Router;
 use clap::Parser;
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 use tower::ServiceBuilder;
 use tower_http::ServiceBuilderExt;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
-mod cancel_on_drop;
+use crate::state::ConsoleSubscriptions;
+
 mod routes;
+mod state;
 mod views;
 
 #[derive(Debug, Parser)]
@@ -38,10 +40,11 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .merge(routes::all())
-        .merge(axum_live_view::precompiled_js_route("/assets/live-view.js"))
+        .route("/assets/live-view.js", axum_live_view::precompiled_js())
         .layer(
             ServiceBuilder::new()
                 .add_extension(Port(config.bind_addr.port()))
+                .add_extension(ConsoleSubscriptions::default())
                 .trace_for_http(),
         );
 
