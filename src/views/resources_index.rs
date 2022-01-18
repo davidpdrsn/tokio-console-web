@@ -1,6 +1,6 @@
 use crate::{
     routes::ConsoleAddr,
-    state::{ConsoleState, ConsoleStateWatch, Resource, ResourceId, TypeVisibility},
+    watch_stream::{ConsoleState, ConsoleStateWatch, Resource, ResourceId, TypeVisibility},
 };
 use axum::{
     async_trait,

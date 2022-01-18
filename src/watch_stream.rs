@@ -172,8 +172,8 @@ async fn subscribe_to_console_updates(
                     for (id, stats) in stats_update {
                         let id = ResourceId(id);
                         let stats = ResourceStats::try_from(stats)?;
-                        if let Some(task) = state.resources.get_mut(&id) {
-                            task.stats = Some(stats);
+                        if let Some(resource) = state.resources.get_mut(&id) {
+                            resource.stats = Some(stats);
                         }
                     }
 

@@ -1,4 +1,4 @@
-use crate::state::ConsoleSubscriptions;
+use crate::watch_stream::ConsoleSubscriptions;
 use axum::Router;
 use axum_flash::Key;
 use clap::Parser;
@@ -8,8 +8,8 @@ use tower_http::ServiceBuilderExt;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
 mod routes;
-mod state;
 mod views;
+mod watch_stream;
 
 #[derive(Debug, Parser)]
 struct Config {

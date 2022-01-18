@@ -1,8 +1,8 @@
-use crate::state::ConsoleStateWatch;
 use crate::views::ConnectionFailed;
+use crate::watch_stream::ConsoleStateWatch;
 use crate::{
-    state::ConsoleSubscriptions, views::resources_index::ResourcesIndex,
-    views::tasks_index::TasksIndex, views::Layout, views::TaskResourceLayout,
+    views::resources_index::ResourcesIndex, views::tasks_index::TasksIndex, views::Layout,
+    views::TaskResourceLayout, watch_stream::ConsoleSubscriptions,
 };
 use axum::extract::Extension;
 use axum::handler::Handler;

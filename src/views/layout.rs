@@ -42,8 +42,14 @@ impl Layout {
 
                             table.tasks-table tr[axm-click]:hover
                             , table.resources-table tr[axm-click]:hover
+                            , table.tasks-table tr.row-selected
+                            , table.resources-table tr.row-selected
                             {
-                                background: #ddd;
+                                background: #ccc;
+                            }
+
+                            .keybinds {
+                                margin: 0.5em 0;
                             }
                         "#
                     </style>

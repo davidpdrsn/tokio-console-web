@@ -1,6 +1,11 @@
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
+
 use crate::{
     routes::ConsoleAddr,
-    state::{ConsoleState, ConsoleStateWatch, Task, TaskId, TaskState},
+    watch_stream::{ConsoleState, ConsoleStateWatch, Task, TaskId, TaskState},
 };
 use axum::{
     async_trait,
@@ -8,7 +13,8 @@ use axum::{
 };
 use axum_live_view::{
     event_data::EventData,
-    html, js_command,
+    html,
+    js_command::{self, JsCommand},
     live_view::{Updated, ViewHandle},
     Html, LiveView,
 };
@@ -19,6 +25,10 @@ pub struct TasksIndex {
     paused_state: Option<ConsoleState>,
     addr: ConsoleAddr,
     connected: bool,
+    selected_idx: Option<usize>,
+    show_key_binds: bool,
+    prev_key_event: Instant,
+    task_runtime_stats: HashMap<TaskId, TaskRuntimeStats>,
 }
 
 impl TasksIndex {
@@ -28,6 +38,10 @@ impl TasksIndex {
             rx,
             paused_state: None,
             connected: true,
+            selected_idx: None,
+            show_key_binds: false,
+            prev_key_event: Instant::now(),
+            task_runtime_stats: Default::default(),
         }
     }
 }
@@ -62,36 +76,9 @@ impl LiveView for TasksIndex {
     async fn update(
         mut self,
         msg: Self::Message,
-        _data: Option<EventData>,
+        data: Option<EventData>,
     ) -> Result<Updated<Self>, Self::Error> {
-        match msg {
-            Msg::TogglePlayPause => {
-                if self.paused_state.is_some() {
-                    self.paused_state = None;
-                } else {
-                    self.paused_state = Some(self.rx.borrow().clone());
-                }
-                Ok(Updated::new(self))
-            }
-            Msg::RowClick(task_id) => {
-                let uri = format!(
-                    "/console/{}/{}/tasks/{}",
-                    self.addr.ip, self.addr.port, task_id.0
-                )
-                .parse()
-                .expect("invalid URI");
-
-                Ok(Updated::new(self).with(js_command::navigate_to(uri)))
-            }
-            Msg::Update => Ok(Updated::new(self)),
-            Msg::Disconnected => {
-                self.connected = false;
-                Ok(Updated::new(self))
-            }
-            Msg::Error => {
-                anyhow::bail!("console subscription disconnected")
-            }
-        }
+        self.do_update(msg, data).await
     }
 
     fn render(&self) -> Html<Self::Message> {
@@ -127,6 +114,16 @@ impl LiveView for TasksIndex {
                 </div>
             }
 
+            if self.show_key_binds {
+                <div class="keybinds">
+                    "Key binds<br>"
+                    "j/k: down/up<br>"
+                    "space: play/pause<br>"
+                    "enter: open task<br>"
+                    "?: show/hide keybinds"
+                </div>
+            }
+
             <div>
                 "Tasks: " { total }
 
@@ -142,6 +139,7 @@ impl LiveView for TasksIndex {
                     ", completed: " { completed }
                 }
             </div>
+
             <div>
                 if self.paused_state.is_some() {
                     <button axm-click={ Msg::TogglePlayPause }>"Play"</button>
@@ -149,7 +147,11 @@ impl LiveView for TasksIndex {
                     <button axm-click={ Msg::TogglePlayPause }>"Pause"</button>
                 }
             </div>
-            <table class="tasks-table">
+
+            <table
+                class="tasks-table"
+                axm-window-keydown={ Msg::Key }
+            >
                 <thead>
                     <tr>
                         <th>"ID"</th>
@@ -165,8 +167,13 @@ impl LiveView for TasksIndex {
                     </tr>
                 </thead>
                 <tbody>
-                    for task in state.tasks.values() {
-                        { task.render_as_table_row() }
+                    for (idx, task) in state.tasks.values().enumerate() {
+                        {
+                            task.render_as_table_row(
+                                Some(idx) == self.selected_idx,
+                                self.task_runtime_stats.get(&task.id),
+                            )
+                        }
                     }
                 </tbody>
             </table>
@@ -181,10 +188,144 @@ pub enum Msg {
     Update,
     Disconnected,
     Error,
+    Key,
+}
+
+impl TasksIndex {
+    async fn do_update(
+        mut self,
+        msg: Msg,
+        data: Option<EventData>,
+    ) -> Result<Updated<Self>, anyhow::Error> {
+        let mut commands = Vec::new();
+
+        match msg {
+            Msg::TogglePlayPause => {
+                self.toggle_play_pause();
+            }
+            Msg::RowClick(task_id) => {
+                commands.push(self.navigate_to_ask_command(task_id));
+            }
+            Msg::Key => {
+                if self.prev_key_event.elapsed() > Duration::from_millis(50) {
+                    self.prev_key_event = Instant::now();
+
+                    let data = data.unwrap();
+                    let key = data.as_key().unwrap().key();
+
+                    match key {
+                        "k" => {
+                            if let Some(idx) = self.selected_idx.as_mut() {
+                                if *idx != 0 {
+                                    *idx -= 1;
+                                }
+                            }
+                        }
+                        "j" => {
+                            if let Some(idx) = self.selected_idx.as_mut() {
+                                *idx += 1;
+                            } else {
+                                self.selected_idx = Some(0);
+                            }
+                        }
+                        "Enter" => {
+                            if let Some(id) = self.selected_task() {
+                                commands.push(self.navigate_to_ask_command(id));
+                            }
+                        }
+                        " " => {
+                            self.toggle_play_pause();
+                        }
+                        "?" => {
+                            self.show_key_binds = !self.show_key_binds;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Msg::Update => {
+                if self.paused_state.is_none() {
+                    for task in self.rx.borrow().tasks.values() {
+                        let mut times = TaskRuntimeStats::default();
+
+                        if let Some(total) = task
+                            .stats
+                            .as_ref()
+                            .and_then(|s| s.created_at)
+                            .map(|t| t.elapsed().unwrap())
+                        {
+                            times.total = Some(total);
+                        }
+
+                        if let Some(busy) = task.stats.as_ref().and_then(|s| s.busy_time) {
+                            times.busy = Some(busy);
+                        }
+
+                        if let Some(idle) = task.stats.as_ref().and_then(|s| s.idle_time()) {
+                            times.idle = Some(idle);
+                        }
+
+                        self.task_runtime_stats.insert(task.id, times);
+                    }
+                }
+            }
+            Msg::Disconnected => {
+                self.connected = false;
+            }
+            Msg::Error => {
+                anyhow::bail!("console subscription disconnected")
+            }
+        };
+
+        if let Some(idx) = self.selected_idx.as_mut() {
+            let num_tasks = if let Some(state) = &self.paused_state {
+                state.tasks.len()
+            } else {
+                self.rx.borrow().tasks.len()
+            };
+            *idx = std::cmp::min(num_tasks - 1, *idx);
+        }
+
+        Ok(Updated::new(self).with_all(commands))
+    }
+
+    fn selected_task(&self) -> Option<TaskId> {
+        let idx = self.selected_idx?;
+        let state = self.rx.borrow();
+        let state = if let Some(state) = &self.paused_state {
+            state
+        } else {
+            &*state
+        };
+        let task = state.tasks.values().nth(idx)?;
+        Some(task.id)
+    }
+
+    fn navigate_to_ask_command(&self, id: TaskId) -> JsCommand {
+        let uri = format!(
+            "/console/{}/{}/tasks/{}",
+            self.addr.ip, self.addr.port, id.0
+        )
+        .parse()
+        .expect("invalid URI");
+        js_command::navigate_to(uri)
+    }
+
+    fn toggle_play_pause(&mut self) {
+        if self.paused_state.is_some() {
+            self.paused_state = None;
+        } else {
+            self.paused_state = Some(self.rx.borrow().clone());
+        }
+    }
 }
 
 impl Task {
-    fn render_as_table_row(&self) -> Html<Msg> {
+    fn render_as_table_row(
+        &self,
+        selected: bool,
+        runtime_stats: Option<&TaskRuntimeStats>,
+    ) -> Html<Msg> {
         let state = match self.state() {
             TaskState::Running => "▶️",
             TaskState::Idle => "⏸",
@@ -192,7 +333,10 @@ impl Task {
         };
 
         html! {
-            <tr axm-click={ Msg::RowClick(self.id) }>
+            <tr
+                axm-click={ Msg::RowClick(self.id) }
+                class=if selected { "row-selected" }
+            >
                 <td>
                     { self.id.0 }
                 </td>
@@ -207,17 +351,17 @@ impl Task {
                     </code>
                 </td>
                 <td>
-                    if let Some(created_at) = self.stats.as_ref().and_then(|s| s.created_at) {
-                        { format!("{:?}", created_at.elapsed().unwrap()) }
+                    if let Some(total) = runtime_stats.and_then(|t| t.total) {
+                        { format!("{:?}", total) }
                     }
                 </td>
                 <td>
-                    if let Some(busy) = self.stats.as_ref().and_then(|s| s.busy_time) {
+                    if let Some(busy) = runtime_stats.and_then(|t| t.busy) {
                         { format!("{:?}", busy) }
                     }
                 </td>
                 <td>
-                    if let Some(idle) = self.stats.as_ref().and_then(|s| s.idle_time()) {
+                    if let Some(idle) = runtime_stats.and_then(|t| t.idle) {
                         { format!("{:?}", idle) }
                     }
                 </td>
@@ -246,4 +390,11 @@ impl Task {
             </tr>
         }
     }
+}
+
+#[derive(Default)]
+struct TaskRuntimeStats {
+    total: Option<Duration>,
+    busy: Option<Duration>,
+    idle: Option<Duration>,
 }
