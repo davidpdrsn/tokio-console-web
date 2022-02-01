@@ -127,7 +127,9 @@ fn resources_index() -> Router {
 
 fn get_state_view<B, F, L>(make_view: F) -> MethodRouter<B>
 where
-    B: Send + 'static,
+    B: axum::body::HttpBody + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<axum::BoxError>,
     F: Fn(ConsoleAddr, ConsoleStateWatch) -> L + Clone + Send + 'static,
     L: LiveView,
 {

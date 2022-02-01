@@ -119,27 +119,26 @@ async fn subscribe_to_console_updates(
                 {
                     let console_api::tasks::TaskUpdate {
                         new_tasks,
-                        stats_update,
+                        mut stats_update,
                         dropped_events: _,
                     } = task_update.context("Missing `task_update` field")?;
 
                     for new_task in new_tasks {
-                        let task = Task::try_from(new_task)?;
-                        state.tasks.insert(task.id, task);
-                    }
+                        let id = new_task.id;
+                        let mut task = Task::try_from(new_task)?;
 
-                    for (id, stats) in stats_update {
-                        let id = TaskId(id);
-                        let stats = TaskStats::try_from(stats)?;
-                        if let Some(task) = state.tasks.get_mut(&id) {
-                            task.stats = Some(stats);
+                        if let Some(id) = id {
+                            if let Some(stats) = stats_update.remove(&id.id) {
+                                let stats = TaskStats::try_from(stats)?;
+                                task.stats = Some(stats);
+                            }
                         }
-                    }
 
-                    for task in state.tasks.values_mut() {
                         if let Some(metadata) = state.metadata.get(&task.metadata_id) {
                             task.target = Some(metadata.target.clone());
                         }
+
+                        state.tasks.insert(task.id, Arc::new(task));
                     }
 
                     state.tasks.retain(|_id, task| {
@@ -159,28 +158,27 @@ async fn subscribe_to_console_updates(
                 {
                     let console_api::resources::ResourceUpdate {
                         new_resources,
-                        stats_update,
+                        mut stats_update,
                         new_poll_ops: _,
                         dropped_events: _,
                     } = resource_update.context("Missing `resource_update` field")?;
 
                     for new_resource in new_resources {
-                        let resource = Resource::try_from(new_resource)?;
-                        state.resources.insert(resource.id, resource);
-                    }
+                        let id = new_resource.id;
+                        let mut resource = Resource::try_from(new_resource)?;
 
-                    for (id, stats) in stats_update {
-                        let id = ResourceId(id);
-                        let stats = ResourceStats::try_from(stats)?;
-                        if let Some(resource) = state.resources.get_mut(&id) {
-                            resource.stats = Some(stats);
+                        if let Some(id) = id {
+                            if let Some(stats) = stats_update.remove(&id.id) {
+                                let stats = ResourceStats::try_from(stats)?;
+                                resource.stats = Some(stats);
+                            }
                         }
-                    }
 
-                    for resource in state.resources.values_mut() {
                         if let Some(metadata) = state.metadata.get(&resource.metadata_id) {
                             resource.target = Some(metadata.target.clone());
                         }
+
+                        state.resources.insert(resource.id, Arc::new(resource));
                     }
 
                     state.resources.retain(|_id, resource| {
@@ -223,8 +221,8 @@ impl ConsoleStateWatch {
 
 #[derive(Default, Clone, Debug)]
 pub struct ConsoleState {
-    pub tasks: BTreeMap<TaskId, Task>,
-    pub resources: BTreeMap<ResourceId, Resource>,
+    pub tasks: BTreeMap<TaskId, Arc<Task>>,
+    pub resources: BTreeMap<ResourceId, Arc<Resource>>,
     pub metadata: HashMap<MetaId, Metadata>,
 }
 

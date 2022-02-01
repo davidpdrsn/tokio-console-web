@@ -1,3 +1,5 @@
+use std::ops::Deref;
+
 use crate::{routes::ConsoleAddr, watch_stream::Location};
 use axum::{
     async_trait,
@@ -14,6 +16,8 @@ pub mod resources_index;
 pub mod tasks_index;
 
 mod layout;
+mod table;
+mod table_view_keybinds;
 
 pub use self::layout::{Layout, TaskResourceLayout};
 
@@ -57,6 +61,22 @@ impl LiveView for ConnectionFailed {
             <div>
                 "Connection failed: " { &self.err }
             </div>
+        }
+    }
+}
+
+enum StateRef<'a, T> {
+    BorrowedFromWatch(tokio::sync::watch::Ref<'a, T>),
+    Ref(&'a T),
+}
+
+impl<'a, T> Deref for StateRef<'a, T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            StateRef::BorrowedFromWatch(r) => &**r,
+            StateRef::Ref(r) => *r,
         }
     }
 }

@@ -7,7 +7,8 @@ edition = "2021"
 anyhow = "1.0"
 axum = "0.4"
 axum-flash = "0.2"
-axum-live-view = { git = "https://github.com/davidpdrsn/axum-live-view", rev = "3a9c37231d9f2", features = ["precompiled-js"] }
+axum-live-view = { path = "/Users/davidpdrsn/dev/major/axum-live-view/axum-live-view", features = ["precompiled-js"] }
+axum-macros = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "3.0", features = ["derive", "env"] }
 console-api = { version = "0.1.0", features = ["transport"] }

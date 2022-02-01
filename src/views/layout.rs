@@ -1,13 +1,10 @@
 use crate::routes::ConsoleAddr;
-use axum::{
-    async_trait,
-    extract::{FromRequest, Path, RequestParts},
-    response::{IntoResponse, Response},
-};
+use axum::extract::Path;
 use axum_flash::IncomingFlashes;
 use axum_live_view::{html, Html};
-use std::convert::Infallible;
 
+#[derive(axum_macros::FromRequest)]
+#[from_request(rejection_derive(!Debug, !Display, !Error))]
 pub struct Layout {
     flash: IncomingFlashes,
 }
@@ -29,20 +26,15 @@ impl Layout {
                                 padding: 3px;
                             }
 
-                            table.tasks-table tr:nth-child(even)
-                            , table.resources-table tr:nth-child(even) {
+                            table.resources-table tr:nth-child(even) {
                                 background: #eee;
                             }
 
-                            table.tasks-table tr[axm-click]
-                            , table.resources-table tr[axm-click]
-                            {
+                            table.resources-table tr[axm-click] {
                                 cursor: pointer;
                             }
 
-                            table.tasks-table tr[axm-click]:hover
-                            , table.resources-table tr[axm-click]:hover
-                            , table.tasks-table tr.row-selected
+                            table.resources-table tr[axm-click]:hover
                             , table.resources-table tr.row-selected
                             {
                                 background: #ccc;
@@ -78,24 +70,11 @@ impl Layout {
     }
 }
 
-#[async_trait]
-impl<B> FromRequest<B> for Layout
-where
-    B: Send,
-{
-    type Rejection = Response;
-
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let flash = IncomingFlashes::from_request(req)
-            .await
-            .map_err(IntoResponse::into_response)?;
-
-        Ok(Self { flash })
-    }
-}
-
+#[derive(axum_macros::FromRequest)]
+#[from_request(rejection_derive(!Debug, !Display, !Error))]
 pub struct TaskResourceLayout {
     layout: Layout,
+    #[from_request(via(Path))]
     addr: ConsoleAddr,
 }
 
@@ -110,20 +89,5 @@ impl TaskResourceLayout {
 
             { content }
         })
-    }
-}
-
-#[async_trait]
-impl<B> FromRequest<B> for TaskResourceLayout
-where
-    B: Send,
-{
-    type Rejection = Infallible;
-
-    async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-        let layout = Layout::from_request(req).await.unwrap();
-        let Path(addr) = Path::<ConsoleAddr>::from_request(req).await.unwrap();
-
-        Ok(Self { layout, addr })
     }
 }

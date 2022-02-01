@@ -7,6 +7,9 @@ use tower::ServiceBuilder;
 use tower_http::ServiceBuilderExt;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
+#[macro_use]
+mod macros;
+
 mod routes;
 mod views;
 mod watch_stream;

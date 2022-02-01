@@ -1,8 +1,8 @@
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
+use super::{
+    table::TableView,
+    table_view_keybinds::{TableViewKeybinds, TableViewKeybindsUpdate},
+    StateRef,
 };
-
 use crate::{
     routes::ConsoleAddr,
     watch_stream::{ConsoleState, ConsoleStateWatch, Task, TaskId, TaskState},
@@ -19,16 +19,16 @@ use axum_live_view::{
     Html, LiveView,
 };
 use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 pub struct TasksIndex {
     rx: ConsoleStateWatch,
     paused_state: Option<ConsoleState>,
     addr: ConsoleAddr,
     connected: bool,
-    selected_idx: Option<usize>,
-    show_key_binds: bool,
-    prev_key_event: Instant,
-    task_runtime_stats: HashMap<TaskId, TaskRuntimeStats>,
+    runtime_stats: HashMap<TaskId, TaskRuntimeStats>,
+    tally: Tally,
+    table_keybinds: TableViewKeybinds,
 }
 
 impl TasksIndex {
@@ -38,12 +38,30 @@ impl TasksIndex {
             rx,
             paused_state: None,
             connected: true,
-            selected_idx: None,
-            show_key_binds: false,
-            prev_key_event: Instant::now(),
-            task_runtime_stats: Default::default(),
+            runtime_stats: Default::default(),
+            tally: Default::default(),
+            table_keybinds: Default::default(),
         }
     }
+}
+
+impl TasksIndex {
+    fn state(&self) -> StateRef<'_, ConsoleState> {
+        let state = self.rx.borrow();
+        if let Some(state) = &self.paused_state {
+            StateRef::Ref(state)
+        } else {
+            StateRef::BorrowedFromWatch(state)
+        }
+    }
+}
+
+#[derive(Default)]
+struct Tally {
+    total: usize,
+    running: usize,
+    idle: usize,
+    completed: usize,
 }
 
 #[async_trait]
@@ -82,27 +100,6 @@ impl LiveView for TasksIndex {
     }
 
     fn render(&self) -> Html<Self::Message> {
-        let state = self.rx.borrow();
-        let state = if let Some(state) = &self.paused_state {
-            state
-        } else {
-            &*state
-        };
-
-        let mut total = 0;
-        let mut running = 0;
-        let mut idle = 0;
-        let mut completed = 0;
-
-        for task in state.tasks.values() {
-            total += 1;
-            match task.state() {
-                TaskState::Running => running += 1,
-                TaskState::Idle => idle += 1,
-                TaskState::Completed => completed += 1,
-            }
-        }
-
         html! {
             if self.connected {
                 <div>
@@ -114,29 +111,21 @@ impl LiveView for TasksIndex {
                 </div>
             }
 
-            if self.show_key_binds {
-                <div class="keybinds">
-                    "Key binds<br>"
-                    "j/k: down/up<br>"
-                    "space: play/pause<br>"
-                    "enter: open task<br>"
-                    "?: show/hide keybinds"
-                </div>
-            }
+            { self.table_keybinds.help() }
 
             <div>
-                "Tasks: " { total }
+                "Tasks: " { self.tally.total }
 
-                if running != 0 {
-                    ", running: " { running }
+                if self.tally.running != 0 {
+                    ", running: " { self.tally.running }
                 }
 
-                if idle != 0 {
-                    ", idle: " { idle }
+                if self.tally.idle != 0 {
+                    ", idle: " { self.tally.idle }
                 }
 
-                if completed != 0 {
-                    ", completed: " { completed }
+                if self.tally.completed != 0 {
+                    ", completed: " { self.tally.completed }
                 }
             </div>
 
@@ -148,35 +137,7 @@ impl LiveView for TasksIndex {
                 }
             </div>
 
-            <table
-                class="tasks-table"
-                axm-window-keydown={ Msg::Key }
-            >
-                <thead>
-                    <tr>
-                        <th>"ID"</th>
-                        <th>"State"</th>
-                        <th>"Name"</th>
-                        <th>"Total"</th>
-                        <th>"Busy"</th>
-                        <th>"Idle"</th>
-                        <th>"Polls"</th>
-                        <th>"Target"</th>
-                        <th>"Location"</th>
-                        <th>"Fields"</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    for (idx, task) in state.tasks.values().enumerate() {
-                        {
-                            task.render_as_table_row(
-                                Some(idx) == self.selected_idx,
-                                self.task_runtime_stats.get(&task.id),
-                            )
-                        }
-                    }
-                </tbody>
-            </table>
+            { self.table_render() }
         }
     }
 }
@@ -204,47 +165,31 @@ impl TasksIndex {
                 self.toggle_play_pause();
             }
             Msg::RowClick(task_id) => {
-                commands.push(self.navigate_to_ask_command(task_id));
+                commands.push(self.navigate_to_task_command(task_id));
             }
-            Msg::Key => {
-                if self.prev_key_event.elapsed() > Duration::from_millis(50) {
-                    self.prev_key_event = Instant::now();
-
-                    let data = data.unwrap();
-                    let key = data.as_key().unwrap().key();
-
-                    match key {
-                        "k" => {
-                            if let Some(idx) = self.selected_idx.as_mut() {
-                                if *idx != 0 {
-                                    *idx -= 1;
-                                }
-                            }
-                        }
-                        "j" => {
-                            if let Some(idx) = self.selected_idx.as_mut() {
-                                *idx += 1;
-                            } else {
-                                self.selected_idx = Some(0);
-                            }
-                        }
-                        "Enter" => {
-                            if let Some(id) = self.selected_task() {
-                                commands.push(self.navigate_to_ask_command(id));
-                            }
-                        }
-                        " " => {
-                            self.toggle_play_pause();
-                        }
-                        "?" => {
-                            self.show_key_binds = !self.show_key_binds;
-                        }
-                        _ => {}
+            Msg::Key => match self.table_keybinds.update(data.as_ref()) {
+                Some(TableViewKeybindsUpdate::Selected(idx)) => {
+                    if let Some(id) = self.selected_task(idx) {
+                        commands.push(self.navigate_to_task_command(id));
                     }
                 }
-            }
+                Some(TableViewKeybindsUpdate::GotoTasks) => {}
+                Some(TableViewKeybindsUpdate::GotoResources) => {
+                    commands.push(js_command::navigate_to(
+                        format!("/console/{}/{}/resources", self.addr.ip, self.addr.port)
+                            .parse()
+                            .unwrap(),
+                    ));
+                }
+                Some(TableViewKeybindsUpdate::TogglePlayPause) => {
+                    self.toggle_play_pause();
+                }
+                None => {}
+            },
             Msg::Update => {
                 if self.paused_state.is_none() {
+                    self.tally = Default::default();
+
                     for task in self.rx.borrow().tasks.values() {
                         let mut times = TaskRuntimeStats::default();
 
@@ -265,7 +210,14 @@ impl TasksIndex {
                             times.idle = Some(idle);
                         }
 
-                        self.task_runtime_stats.insert(task.id, times);
+                        self.runtime_stats.insert(task.id, times);
+
+                        self.tally.total += 1;
+                        match task.state() {
+                            TaskState::Running => self.tally.running += 1,
+                            TaskState::Idle => self.tally.idle += 1,
+                            TaskState::Completed => self.tally.completed += 1,
+                        }
                     }
                 }
             }
@@ -277,31 +229,19 @@ impl TasksIndex {
             }
         };
 
-        if let Some(idx) = self.selected_idx.as_mut() {
-            let num_tasks = if let Some(state) = &self.paused_state {
-                state.tasks.len()
-            } else {
-                self.rx.borrow().tasks.len()
-            };
-            *idx = std::cmp::min(num_tasks - 1, *idx);
-        }
+        let num_tasks = self.state().tasks.len();
+        self.table_keybinds.clamp_selected_idx(num_tasks);
 
         Ok(Updated::new(self).with_all(commands))
     }
 
-    fn selected_task(&self) -> Option<TaskId> {
-        let idx = self.selected_idx?;
-        let state = self.rx.borrow();
-        let state = if let Some(state) = &self.paused_state {
-            state
-        } else {
-            &*state
-        };
+    fn selected_task(&self, idx: usize) -> Option<TaskId> {
+        let state = self.state();
         let task = state.tasks.values().nth(idx)?;
         Some(task.id)
     }
 
-    fn navigate_to_ask_command(&self, id: TaskId) -> JsCommand {
+    fn navigate_to_task_command(&self, id: TaskId) -> JsCommand {
         let uri = format!(
             "/console/{}/{}/tasks/{}",
             self.addr.ip, self.addr.port, id.0
@@ -320,81 +260,141 @@ impl TasksIndex {
     }
 }
 
-impl Task {
-    fn render_as_table_row(
-        &self,
-        selected: bool,
-        runtime_stats: Option<&TaskRuntimeStats>,
-    ) -> Html<Msg> {
-        let state = match self.state() {
-            TaskState::Running => "▶️",
-            TaskState::Idle => "⏸",
-            TaskState::Completed => "⏹",
-        };
+pub(crate) struct TaskViewModel {
+    task: Arc<Task>,
+    runtime_stats: Option<TaskRuntimeStats>,
+}
 
-        html! {
-            <tr
-                axm-click={ Msg::RowClick(self.id) }
-                class=if selected { "row-selected" }
-            >
-                <td>
-                    { self.id.0 }
-                </td>
-                <td>{ state }</td>
-                <td>
+#[derive(Default, Clone, Copy)]
+struct TaskRuntimeStats {
+    total: Option<Duration>,
+    busy: Option<Duration>,
+    idle: Option<Duration>,
+}
+
+impl TableView for TasksIndex {
+    type Column = Column;
+    type Model = TaskViewModel;
+    type Msg = Msg;
+
+    fn columns(&self) -> Vec<Self::Column> {
+        Column::all()
+    }
+
+    fn rows(&self) -> Vec<Self::Model> {
+        self.state()
+            .tasks
+            .values()
+            .map(|task| TaskViewModel {
+                task: Arc::clone(task),
+                runtime_stats: self.runtime_stats.get(&task.id).copied(),
+            })
+            .collect()
+    }
+
+    fn row_click_event(&self, row: &TaskViewModel) -> Self::Msg {
+        Msg::RowClick(row.task.id)
+    }
+
+    fn key_event(&self) -> Self::Msg {
+        Msg::Key
+    }
+
+    fn row_selected(&self, idx: usize, _: &Self::Model) -> bool {
+        self.table_keybinds.selected_idx() == Some(idx)
+    }
+
+    fn render_column(&self, col: &Self::Column, row: &TaskViewModel) -> Html<Self::Msg> {
+        match col {
+            Column::ID => {
+                html! { { row.task.id.0 } }
+            }
+            Column::State => {
+                let state = match row.task.state() {
+                    TaskState::Running => "▶️",
+                    TaskState::Idle => "⏸",
+                    TaskState::Completed => "⏹",
+                };
+
+                html! { { state } }
+            }
+            Column::Name => {
+                html! {
                     <code>
-                        if let Some(name) = self.name() {
+                        if let Some(name) = row.task.name() {
                             { name }
                         } else {
                             ""
                         }
                     </code>
-                </td>
-                <td>
-                    if let Some(total) = runtime_stats.and_then(|t| t.total) {
+                }
+            }
+            Column::Total => {
+                html! {
+                    if let Some(total) = row.runtime_stats.and_then(|t| t.total) {
                         { format!("{:?}", total) }
                     }
-                </td>
-                <td>
-                    if let Some(busy) = runtime_stats.and_then(|t| t.busy) {
+                }
+            }
+            Column::Busy => {
+                html! {
+                    if let Some(busy) = row.runtime_stats.and_then(|t| t.busy) {
                         { format!("{:?}", busy) }
                     }
-                </td>
-                <td>
-                    if let Some(idle) = runtime_stats.and_then(|t| t.idle) {
+                }
+            }
+            Column::Idle => {
+                html! {
+                    if let Some(idle) = row.runtime_stats.and_then(|t| t.idle) {
                         { format!("{:?}", idle) }
                     }
-                </td>
-                <td>
-                    if let Some(stats) = &self.stats {
+                }
+            }
+            Column::Polls => {
+                html! {
+                    if let Some(stats) = &row.task.stats {
                         { stats.polls }
                     }
-                </td>
-                <td>
-                    if let Some(target) = &self.target {
+                }
+            }
+            Column::Target => {
+                html! {
+                    if let Some(target) = &row.task.target {
                         <code>{ target }</code>
                     }
-                </td>
-                <td>
+                }
+            }
+            Column::Location => {
+                html! {
                     <code>
-                        { self.location.render() }
+                        { row.task.location.render() }
                     </code>
-                </td>
-                <td>
-                    for (name, value) in self.fields.iter().filter(|(name, _)| name != &"task.name") {
+                }
+            }
+            Column::Fields => {
+                html! {
+                    for (name, value) in row.task.fields.iter().filter(|(name, _)| name != &"task.name") {
                         <code>
                             { format!("{}={}", name, value) }
                         </code>
                     }
-                </td>
-            </tr>
+                }
+            }
         }
     }
 }
 
-#[derive(Default)]
-struct TaskRuntimeStats {
-    total: Option<Duration>,
-    busy: Option<Duration>,
-    idle: Option<Duration>,
+columns_enum! {
+    pub(crate) enum Column {
+        ID,
+        State,
+        Name,
+        Total,
+        Busy,
+        Idle,
+        Polls,
+        Target,
+        Location,
+        Fields,
+    }
 }
